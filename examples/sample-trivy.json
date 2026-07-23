@@ -1,0 +1,63 @@
+{
+  "SchemaVersion": 2,
+  "ArtifactName": ".",
+  "ArtifactType": "filesystem",
+  "Results": [
+    {
+      "Target": "requirements.txt",
+      "Class": "lang-pkgs",
+      "Type": "pip",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2025-12345",
+          "PkgName": "urllib3",
+          "InstalledVersion": "1.25.0",
+          "FixedVersion": "2.5.0",
+          "Severity": "HIGH",
+          "Title": "urllib3 proxy credentials leak",
+          "Description": "A crafted proxy response can expose credentials in urllib3.",
+          "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2025-12345"
+        }
+      ]
+    },
+    {
+      "Target": "k8s/production/deployment.yaml",
+      "Class": "config",
+      "Type": "kubernetes",
+      "Misconfigurations": [
+        {
+          "ID": "AVD-KSV-0012",
+          "AVDID": "AVD-KSV-0012",
+          "Title": "Container allows privilege escalation",
+          "Description": "The workload allows a process to gain more privileges than its parent.",
+          "Message": "Container securityContext allows privilege escalation.",
+          "Resolution": "Set allowPrivilegeEscalation to false.",
+          "Severity": "CRITICAL",
+          "Resource": "Deployment/api",
+          "PrimaryURL": "https://avd.aquasec.com/misconfig/ksv0012",
+          "CauseMetadata": {
+            "FilePath": "k8s/production/deployment.yaml",
+            "StartLine": 31,
+            "EndLine": 36
+          }
+        }
+      ]
+    },
+    {
+      "Target": "terraform/production/secrets.tf",
+      "Class": "secret",
+      "Type": "terraform",
+      "Secrets": [
+        {
+          "RuleID": "aws-access-key-id",
+          "Category": "AWS",
+          "Severity": "CRITICAL",
+          "Title": "AWS Access Key ID",
+          "Match": "aws_access_key_id = \"AKIA1234567890ABCDEF\"",
+          "StartLine": 4,
+          "EndLine": 4
+        }
+      ]
+    }
+  ]
+}

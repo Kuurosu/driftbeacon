@@ -1,0 +1,37 @@
+{
+  "SchemaVersion": 2,
+  "Results": [
+    {
+      "Target": "requirements.txt",
+      "Class": "lang-pkgs",
+      "Type": "pip",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2025-12345",
+          "PkgName": "urllib3",
+          "InstalledVersion": "1.25.0",
+          "FixedVersion": "2.5.0",
+          "Severity": "HIGH",
+          "Title": "urllib3 proxy credentials leak",
+          "Description": "A crafted proxy response can expose credentials in urllib3.",
+          "PrimaryURL": "https://avd.aquasec.com/nvd/cve-2025-12345"
+        }
+      ]
+    },
+    {
+      "Target": "terraform/production/secrets.tf",
+      "Class": "secret",
+      "Type": "terraform",
+      "Secrets": [
+        {
+          "RuleID": "aws-access-key-id",
+          "Category": "AWS",
+          "Severity": "CRITICAL",
+          "Title": "AWS Access Key ID",
+          "Match": "aws_access_key_id = \"AKIA1234567890ABCDEF\"",
+          "StartLine": 4
+        }
+      ]
+    }
+  ]
+}

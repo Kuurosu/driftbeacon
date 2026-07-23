@@ -1,0 +1,77 @@
+name: DriftBeacon Weekly
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  weekly:
+    name: Weekly infrastructure report
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restore previous DriftBeacon scan
+        uses: actions/cache/restore@v4
+        with:
+          path: .DriftBeacon-history
+          key: ${{ runner.os }}-driftbeacon-${{ github.repository_id }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-driftbeacon-${{ github.repository_id }}-${{ github.ref_name }}-
+
+      - name: Install DriftBeacon and Checkov
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install checkov
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.3
+
+      - name: Run DriftBeacon
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          mkdir -p .DriftBeacon-history
+          DriftBeacon run \
+            --repository-path . \
+            --output-dir .DriftBeacon \
+            --previous-scan .DriftBeacon-history/previous-scan.json \
+            --slack-webhook-env SLACK_WEBHOOK_URL
+
+      - name: Save current scan for next run
+        if: always() && hashFiles('.DriftBeacon/current-scan.json') != ''
+        run: |
+          mkdir -p .DriftBeacon-history
+          cp .DriftBeacon/current-scan.json .DriftBeacon-history/previous-scan.json
+
+      - name: Save DriftBeacon history cache
+        if: always() && hashFiles('.DriftBeacon-history/previous-scan.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .DriftBeacon-history
+          key: ${{ runner.os }}-driftbeacon-${{ github.repository_id }}-${{ github.ref_name }}-${{ github.run_id }}
+
+      - name: Upload DriftBeacon artifacts
+        if: always() && hashFiles('.DriftBeacon/report.md') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: driftbeacon-weekly
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            .DriftBeacon/report.md
+            .DriftBeacon/current-scan.json
+            .DriftBeacon/comparison-summary.json

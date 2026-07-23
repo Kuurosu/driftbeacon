@@ -1,0 +1,29 @@
+{
+  "check_type": "terraform",
+  "results": {
+    "failed_checks": [
+      {
+        "check_id": "CKV_AWS_355",
+        "check_name": "Wildcard IAM permissions added",
+        "description": "IAM policy allows wildcard actions and resources.",
+        "severity": "HIGH",
+        "bc_category": "IAM",
+        "file_path": "terraform/production/iam.tf",
+        "file_line_range": [12, 18],
+        "resource": "aws_iam_policy.admin",
+        "guideline": "https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-iam-policies"
+      },
+      {
+        "check_id": "CKV_AWS_20",
+        "check_name": "S3 bucket allows public read access",
+        "description": "The S3 bucket ACL allows public read access from the internet.",
+        "severity": "HIGH",
+        "bc_category": "S3",
+        "file_path": "terraform/production/s3.tf",
+        "file_line_range": [7, 10],
+        "resource": "aws_s3_bucket_acl.public_assets",
+        "guideline": "Disable public ACLs and enable S3 Block Public Access."
+      }
+    ]
+  }
+}

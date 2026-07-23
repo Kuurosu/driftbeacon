@@ -1,0 +1,85 @@
+{
+  "repository": "Kuurosu/driftbeacon",
+  "branch": "main",
+  "commit_sha": "1111111111111111111111111111111111111111",
+  "started_at": "2026-07-16T08:00:00+00:00",
+  "completed_at": "2026-07-16T08:01:00+00:00",
+  "scanner_statuses": {
+    "checkov": {
+      "name": "checkov",
+      "status": "success",
+      "message": "loaded 2 findings from JSON",
+      "duration_seconds": 12.1
+    },
+    "trivy": {
+      "name": "trivy",
+      "status": "success",
+      "message": "loaded 1 findings from JSON",
+      "duration_seconds": 17.2
+    }
+  },
+  "findings": [
+    {
+      "id": "checkov-2deedfe59ec161bcc047",
+      "scanner": "checkov",
+      "rule_id": "CKV_AWS_355",
+      "title": "Wildcard IAM permissions added",
+      "description": "IAM policy allows wildcard actions and resources.",
+      "severity": "medium",
+      "category": "iam",
+      "file_path": "terraform/production/iam.tf",
+      "line_start": 12,
+      "resource": "aws_iam_policy.admin",
+      "status": "recurring",
+      "first_seen": "2026-07-09T08:00:00+00:00",
+      "last_seen": "2026-07-16T08:01:00+00:00",
+      "fingerprint": "2deedfe59ec161bcc047",
+      "remediation": "Review the linked guidance for CKV_AWS_355 and update the affected resource.",
+      "documentation_url": "https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-iam-policies"
+    },
+    {
+      "id": "trivy-f4c899f49795810a82b8",
+      "scanner": "trivy",
+      "rule_id": "CVE-2025-12345",
+      "title": "urllib3 proxy credentials leak",
+      "description": "A crafted proxy response can expose credentials in urllib3.",
+      "severity": "high",
+      "category": "vulnerability",
+      "file_path": "requirements.txt",
+      "line_start": null,
+      "resource": "urllib3",
+      "status": "recurring",
+      "first_seen": "2026-07-16T08:00:00+00:00",
+      "last_seen": "2026-07-16T08:01:00+00:00",
+      "fingerprint": "f4c899f49795810a82b8",
+      "remediation": "Upgrade urllib3 to 2.5.0 or later.",
+      "documentation_url": "https://avd.aquasec.com/nvd/cve-2025-12345"
+    },
+    {
+      "id": "checkov-a28edacf413c07bbd0dd",
+      "scanner": "checkov",
+      "rule_id": "CKV_AWS_24",
+      "title": "Security group allows unrestricted SSH",
+      "description": "Security group ingress allows SSH from 0.0.0.0/0.",
+      "severity": "high",
+      "category": "network",
+      "file_path": "terraform/production/security-group.tf",
+      "line_start": 42,
+      "resource": "aws_security_group.web",
+      "status": "recurring",
+      "first_seen": "2026-07-09T08:00:00+00:00",
+      "last_seen": "2026-07-16T08:01:00+00:00",
+      "fingerprint": "a28edacf413c07bbd0dd",
+      "remediation": "Restrict SSH ingress to approved administration networks.",
+      "documentation_url": null
+    }
+  ],
+  "health_score": 71,
+  "summary": {
+    "active_findings": 3,
+    "new_findings": 0,
+    "recurring_findings": 3,
+    "resolved_findings": 0,
+    "severity_changes": 0
+  }
+}

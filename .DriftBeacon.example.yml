@@ -1,0 +1,20 @@
+repository_path: .
+output_dir: .DriftBeacon
+scanners:
+  checkov:
+    enabled: true
+  trivy:
+    enabled: true
+    secret_scanning: false
+report:
+  top_findings: 3
+thresholds:
+  fail_on: null
+paths:
+  production_patterns:
+    - production
+    - prod
+    - live
+slack:
+  enabled: true
+  webhook_environment_variable: SLACK_WEBHOOK_URL

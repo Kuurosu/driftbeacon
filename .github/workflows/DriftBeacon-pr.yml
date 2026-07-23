@@ -1,0 +1,74 @@
+name: DriftBeacon PR
+
+on:
+  pull_request:
+    paths:
+      - "**/*.tf"
+      - "**/*.tfvars"
+      - "**/*.tf.json"
+      - "**/*.yaml"
+      - "**/*.yml"
+      - "**/Dockerfile"
+      - "**/Dockerfile.*"
+      - "**/requirements*.txt"
+      - "**/pyproject.toml"
+      - "**/poetry.lock"
+      - "**/Pipfile.lock"
+      - "**/package.json"
+      - "**/package-lock.json"
+      - "**/yarn.lock"
+      - "**/go.mod"
+      - "**/go.sum"
+      - ".DriftBeacon.yml"
+      - "src/**"
+      - "tests/**"
+
+permissions:
+  contents: read
+
+jobs:
+  pr:
+    name: Pull request infrastructure report
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install DriftBeacon and Checkov
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install checkov
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.3
+
+      - name: Run DriftBeacon without Slack
+        run: |
+          DriftBeacon run \
+            --repository-path . \
+            --output-dir .DriftBeacon \
+            --no-slack
+
+      - name: Add DriftBeacon report to job summary
+        if: always() && hashFiles('.DriftBeacon/report.md') != ''
+        run: cat .DriftBeacon/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload DriftBeacon artifacts
+        if: always() && hashFiles('.DriftBeacon/report.md') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: driftbeacon-pr
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            .DriftBeacon/report.md
+            .DriftBeacon/current-scan.json
+            .DriftBeacon/comparison-summary.json
