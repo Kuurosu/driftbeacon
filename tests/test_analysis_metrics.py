@@ -7,11 +7,14 @@ from driftbeacon.analysis_metrics import (
     classify_repository,
     density_metrics,
     enrich_findings_for_analysis,
+    evaluate_production_score,
     evaluate_score,
+    production_findings,
     scanner_result_from_execution,
 )
 from driftbeacon.models import Finding, ScannerStatus
 from driftbeacon.scanners import ScannerExecution
+from driftbeacon.scoring import calculate_health_score
 
 
 def _finding(
@@ -149,6 +152,83 @@ def test_density_can_exceed_100_findings_per_100_supported_files() -> None:
     assert metrics.findings_per_100_supported_files == 300.0
 
 
+def test_test_only_findings_do_not_reduce_production_health() -> None:
+    findings = [_finding("test-only", file_path="tests/main.tf")]
+    enrich_findings_for_analysis(findings)
+    scanners = [
+        scanner_result_from_execution("repo", _execution("checkov", "success"), applicable=True)
+    ]
+
+    overall = evaluate_score(findings, supported_file_count=2, scanner_results=scanners)
+    production = evaluate_production_score(
+        findings,
+        supported_files=[Path("main.tf"), Path("tests/main.tf")],
+        scanner_results=scanners,
+    )
+
+    assert overall.health_score is not None and overall.health_score < 100
+    assert production.health_score == 100
+
+
+def test_production_findings_reduce_overall_and_production_health() -> None:
+    findings = [_finding("prod", file_path="main.tf")]
+    enrich_findings_for_analysis(findings)
+    scanners = [
+        scanner_result_from_execution("repo", _execution("checkov", "success"), applicable=True)
+    ]
+
+    overall = evaluate_score(findings, supported_file_count=1, scanner_results=scanners)
+    production = evaluate_production_score(
+        findings,
+        supported_files=[Path("main.tf")],
+        scanner_results=scanners,
+    )
+
+    assert overall.health_score == production.health_score
+    assert production.health_score == calculate_health_score(production_findings(findings))
+
+
+def test_test_only_repository_has_no_production_health() -> None:
+    findings = [_finding("test-only", file_path="tests/main.tf")]
+    enrich_findings_for_analysis(findings)
+    scanners = [
+        scanner_result_from_execution("repo", _execution("checkov", "success"), applicable=True)
+    ]
+
+    overall = evaluate_score(findings, supported_file_count=1, scanner_results=scanners)
+    production = evaluate_production_score(
+        findings,
+        supported_files=[Path("tests/main.tf")],
+        scanner_results=scanners,
+    )
+
+    assert overall.health_score is not None
+    assert production.health_score is None
+    assert production.score_state == "not_scored_no_supported_files"
+    assert production.score_reason == "No production-supported files detected."
+
+
+def test_duplicate_production_findings_do_not_score_twice() -> None:
+    findings = [
+        _finding("duplicate", file_path="main.tf"),
+        _finding("duplicate", file_path="main.tf"),
+    ]
+    enrich_findings_for_analysis(findings)
+    scanners = [
+        scanner_result_from_execution("repo", _execution("checkov", "success"), applicable=True)
+    ]
+
+    overall = evaluate_score(findings, supported_file_count=1, scanner_results=scanners)
+    production = evaluate_production_score(
+        findings,
+        supported_files=[Path("main.tf")],
+        scanner_results=scanners,
+    )
+
+    assert overall.health_score == calculate_health_score([findings[0]])
+    assert production.health_score == calculate_health_score([findings[0]])
+
+
 def test_repository_category_regressions(tmp_path: Path) -> None:
     assert classify_repository("gruntwork-io/terragrunt", tmp_path, []).category == (
         "Terraform tooling"
@@ -164,6 +244,21 @@ def test_repository_category_regressions(tmp_path: Path) -> None:
         tmp_path,
         [Path("main.tf"), Path("variables.tf"), Path("outputs.tf")],
     ).category == "Terraform module"
+    assert classify_repository(
+        "terraform-aws-modules/terraform-aws-iam",
+        tmp_path,
+        [Path("modules/iam-role/main.tf"), Path("examples/complete/main.tf")],
+    ).category == "Terraform module"
+    assert classify_repository(
+        "hashicorp/learn-terraform-modules",
+        tmp_path,
+        [Path("main.tf"), Path("variables.tf")],
+    ).category == "Terraform examples or guides"
+    assert classify_repository(
+        "hashicorp/learn-terraform-provision-eks-cluster",
+        tmp_path,
+        [Path("main.tf"), Path("kubernetes/deployment.yaml")],
+    ).category == "Terraform examples or guides"
     assert classify_repository(
         "argoproj/argo-cd",
         tmp_path,

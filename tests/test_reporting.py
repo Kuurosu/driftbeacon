@@ -44,3 +44,55 @@ def test_report_generation_includes_top_directories_and_files(
     assert "| terraform/production | 3 |" in report
     assert "## Top files by actionable findings" in report
     assert "| terraform/production/main.tf | 2 |" in report
+
+
+def test_report_generation_marks_partial_grades_provisional(
+    current_scan: ScanResult,
+    previous_scan: ScanResult,
+) -> None:
+    comparison = compare_scans(current_scan, previous_scan)
+    current_scan.health_score = 95
+    current_scan.summary.update(
+        {
+            "coverage_state": "partial_coverage",
+            "grade_provisional": True,
+            "production_health_score": 95,
+            "production_grade": "A",
+            "production_grade_provisional": True,
+            "production_score_reason": (
+                "Production Health calculated from successful scanner output; "
+                "coverage is incomplete."
+            ),
+        }
+    )
+
+    report = generate_report(current_scan, comparison)
+
+    assert "**Grade:** A*" in report
+    assert "**Production Health:** 95/100" in report
+    assert "**Production Grade:** A*" in report
+    assert "Grade is provisional because one or more applicable scanners failed." in report
+
+
+def test_report_generation_keeps_complete_grade_unmarked(
+    current_scan: ScanResult,
+    previous_scan: ScanResult,
+) -> None:
+    comparison = compare_scans(current_scan, previous_scan)
+    current_scan.health_score = 95
+    current_scan.summary.update(
+        {
+            "coverage_state": "complete_coverage",
+            "grade_provisional": False,
+            "production_health_score": None,
+            "production_grade": "N/A",
+            "production_grade_provisional": False,
+        }
+    )
+
+    report = generate_report(current_scan, comparison)
+
+    assert "**Grade:** A" in report
+    assert "**Grade:** A*" not in report
+    assert "**Production Grade:** N/A" in report
+    assert "N/A*" not in report

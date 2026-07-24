@@ -40,6 +40,9 @@ def generate_report(
         f"**Branch:** {redact_secrets(scan.branch)}",
         f"**Commit:** `{scan.commit_sha[:12]}`",
         f"**Health score:** {_health_score_text(scan)} ({_health_trend(comparison)})",
+        f"**Grade:** {_grade_text(scan)}",
+        f"**Production Health:** {_production_health_score_text(scan)}",
+        f"**Production Grade:** {_production_grade_text(scan)}",
         f"**Coverage:** {_coverage_text(scan)}",
         f"**Score status:** {_score_state_text(scan)}",
         f"**Active findings:** {active_count}",
@@ -70,6 +73,10 @@ def generate_report(
         lines.append(
             "One or more applicable scanners failed, so this score is based on partial coverage."
         )
+        lines.append("Grade is provisional because one or more applicable scanners failed.")
+    elif _production_grade_provisional(scan):
+        lines.extend(["", "## Coverage warning"])
+        lines.append("Grade is provisional because one or more applicable scanners failed.")
 
     lines.extend(["", "## Finding audit"])
     lines.extend(_audit_lines(scan))
@@ -87,6 +94,12 @@ def generate_report(
         f"low={SEVERITY_WEIGHTS['low']}. Informational findings, unknown-severity findings, "
         "passed checks, skipped scanners, scanner-error records, duplicates, and first-scan "
         "baseline status do not reduce the score."
+    )
+    lines.append(
+        "Overall Health includes all analysed actionable findings. Production Health uses the "
+        "same formula but only includes findings from paths classified as production. It does "
+        "not prove deployed infrastructure is safe; path classification is heuristic and should "
+        "be reviewed."
     )
     if comparison.score_formula_changed:
         lines.append(
@@ -162,6 +175,10 @@ def _audit_lines(scan: ScanResult) -> list[str]:
         f"- Duplicate findings removed: {summary.get('duplicate_findings_removed', 0)}",
         f"- Scanner errors: {summary.get('scanner_errors', 0)}",
         f"- Score reason: {_summary_text(scan, 'score_reason', 'n/a')}",
+        "- Production score reason: "
+        f"{_summary_text(scan, 'production_score_reason', 'n/a')}",
+        "- Production actionable findings: "
+        f"{summary.get('production_actionable_findings', 0)}",
         "- Score formula version: "
         f"{_summary_text(scan, 'score_formula_version', SCORE_FORMULA_VERSION)}",
     ]
@@ -261,9 +278,67 @@ def _health_score_text(scan: ScanResult) -> str:
     return f"{scan.health_score}/100"
 
 
+def _production_health_score_text(scan: ScanResult) -> str:
+    score = _summary_optional_int(scan, "production_health_score")
+    if score is None:
+        return "Not scored"
+    return f"{score}/100"
+
+
+def _grade_text(scan: ScanResult) -> str:
+    return _display_grade(_grade_for_score(scan.health_score), _grade_provisional(scan))
+
+
+def _production_grade_text(scan: ScanResult) -> str:
+    grade = _summary_text(
+        scan,
+        "production_grade",
+        _grade_for_score(_summary_optional_int(scan, "production_health_score")),
+    )
+    return _display_grade(grade, _production_grade_provisional(scan))
+
+
+def _grade_for_score(score: int | None) -> str:
+    if score is None:
+        return "N/A"
+    if score >= 90:
+        return "A"
+    if score >= 80:
+        return "B"
+    if score >= 70:
+        return "C"
+    if score >= 60:
+        return "D"
+    return "F"
+
+
+def _display_grade(grade: str, provisional: bool) -> str:
+    return f"{grade}*" if provisional and grade != "N/A" else grade
+
+
+def _grade_provisional(scan: ScanResult) -> bool:
+    return _summary_bool(scan, "grade_provisional") or (
+        scan.health_score is not None
+        and _summary_text(scan, "coverage_state", "") == "partial_coverage"
+    )
+
+
+def _production_grade_provisional(scan: ScanResult) -> bool:
+    return _summary_bool(scan, "production_grade_provisional")
+
+
 def _summary_text(scan: ScanResult, key: str, default: str) -> str:
     value = scan.summary.get(key, default)
     return str(value)
+
+
+def _summary_optional_int(scan: ScanResult, key: str) -> int | None:
+    value = scan.summary.get(key)
+    return value if isinstance(value, int) else None
+
+
+def _summary_bool(scan: ScanResult, key: str) -> bool:
+    return scan.summary.get(key) is True
 
 
 def _coverage_text(scan: ScanResult) -> str:

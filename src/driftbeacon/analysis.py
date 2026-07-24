@@ -26,9 +26,11 @@ from .analysis_metrics import (
     density_metrics,
     directory_group_breakdown,
     enrich_findings_for_analysis,
+    evaluate_production_score,
     evaluate_score,
     excluded_finding_counts,
     finding_source_breakdown,
+    production_findings,
     scanner_issue_rows,
     scanner_result_from_execution,
     source_label,
@@ -124,6 +126,15 @@ class RepositoryAnalysisResult:
     score_state: str = "scored"
     coverage_state: str = "complete_coverage"
     score_reason: str = ""
+    production_health_score: int | None = None
+    production_score_state: str = "not_scored_no_supported_files"
+    production_coverage_state: str = "not_scored_no_supported_files"
+    production_score_reason: str = "No production-supported files detected."
+    production_actionable_findings: int = 0
+    production_critical_findings: int = 0
+    production_high_findings: int = 0
+    production_medium_findings: int = 0
+    production_low_findings: int = 0
     low_findings: int = 0
     total_findings: int = 0
     resolved_findings: int = 0
@@ -160,6 +171,21 @@ class RepositoryAnalysisResult:
         return health_grade(self.health_score)
 
     @property
+    def grade_provisional(self) -> bool:
+        return _grade_provisional(self.health_score, self.coverage_state)
+
+    @property
+    def production_grade(self) -> str:
+        return health_grade(self.production_health_score)
+
+    @property
+    def production_grade_provisional(self) -> bool:
+        return _grade_provisional(
+            self.production_health_score,
+            self.production_coverage_state,
+        )
+
+    @property
     def findings_per_100_supported_files(self) -> float | None:
         return self.density.findings_per_100_supported_files
 
@@ -191,9 +217,20 @@ class RepositoryAnalysisResult:
             "category_evidence": list(self.category_evidence),
             "health_score": self.health_score,
             "grade": self.grade,
+            "grade_provisional": self.grade_provisional,
             "score_state": self.score_state,
             "coverage_state": self.coverage_state,
             "score_reason": self.score_reason,
+            "production_health_score": self.production_health_score,
+            "production_grade": self.production_grade,
+            "production_grade_provisional": self.production_grade_provisional,
+            "production_score_state": self.production_score_state,
+            "production_score_reason": self.production_score_reason,
+            "production_actionable_findings": self.production_actionable_findings,
+            "production_critical_findings": self.production_critical_findings,
+            "production_high_findings": self.production_high_findings,
+            "production_medium_findings": self.production_medium_findings,
+            "production_low_findings": self.production_low_findings,
             "critical": self.critical_findings,
             "high": self.high_findings,
             "medium": self.medium_findings,
@@ -364,6 +401,14 @@ def analyse_repository(
             supported_file_count=len(supported_files),
             scanner_results=scanner_results,
         )
+        production_score = evaluate_production_score(
+            scan.findings,
+            supported_files=supported_files,
+            scanner_results=scanner_results,
+        )
+        production_only_findings = production_findings(scan.findings)
+        production_counts = severity_counts(production_only_findings)
+        production_actionable = actionable_active_findings(production_only_findings)
         source_breakdown = finding_source_breakdown(
             scan.findings,
             include_repositories=(repository,),
@@ -379,6 +424,24 @@ def analyse_repository(
             "coverage_state": score.coverage_state,
             "score_reason": score.score_reason,
             "score_formula_version": SCORE_FORMULA_VERSION,
+            "grade_provisional": _grade_provisional(
+                score.health_score,
+                score.coverage_state,
+            ),
+            "production_health_score": production_score.health_score,
+            "production_grade": health_grade(production_score.health_score),
+            "production_grade_provisional": _grade_provisional(
+                production_score.health_score,
+                production_score.coverage_state,
+            ),
+            "production_score_state": production_score.score_state,
+            "production_coverage_state": production_score.coverage_state,
+            "production_score_reason": production_score.score_reason,
+            "production_actionable_findings": len(production_actionable),
+            "production_critical_findings": production_counts["critical"],
+            "production_high_findings": production_counts["high"],
+            "production_medium_findings": production_counts["medium"],
+            "production_low_findings": production_counts["low"],
             "excluded_path_groups": ",".join(options.exclude_path_groups),
             "finding_source_breakdown": source_breakdown,
             "directory_group_breakdown": group_breakdown,
@@ -395,6 +458,10 @@ def analyse_repository(
             "score_state": score.score_state,
             "coverage_state": score.coverage_state,
             "score_reason": score.score_reason,
+            "production_health_score": production_score.health_score,
+            "production_score_state": production_score.score_state,
+            "production_coverage_state": production_score.coverage_state,
+            "production_score_reason": production_score.score_reason,
         }
         top = prioritise_findings(
             [finding for finding in scan.findings if not finding.excluded_from_score],
@@ -440,6 +507,15 @@ def analyse_repository(
             score_state=score.score_state,
             coverage_state=score.coverage_state,
             score_reason=score.score_reason,
+            production_health_score=production_score.health_score,
+            production_score_state=production_score.score_state,
+            production_coverage_state=production_score.coverage_state,
+            production_score_reason=production_score.score_reason,
+            production_actionable_findings=len(production_actionable),
+            production_critical_findings=production_counts["critical"],
+            production_high_findings=production_counts["high"],
+            production_medium_findings=production_counts["medium"],
+            production_low_findings=production_counts["low"],
             low_findings=counts["low"],
             total_findings=total_findings,
             resolved_findings=len(actionable_findings(comparison.resolved_findings))
@@ -611,6 +687,10 @@ def analysis_summary_markdown(
             "- Large and small repositories are not directly comparable by raw finding count.",
             "- Results should not be presented as an accusation against maintainers.",
             "- Health uses deduplicated active critical, high, medium, and low findings only.",
+            "- Overall Health includes all analysed actionable findings.",
+            "- Production Health only includes findings from paths classified as production.",
+            "- Production Health does not prove deployed infrastructure is safe.",
+            "- Path classification is heuristic and should be reviewed.",
             "- Scores require meaningful scanner coverage.",
             "- A clean result with zero scanned files is unscored, not healthy.",
             "- Partial scanner failures produce partial coverage.",
@@ -908,9 +988,20 @@ def _csv_fieldnames() -> list[str]:
         "category_evidence",
         "health_score",
         "grade",
+        "grade_provisional",
         "score_state",
         "coverage_state",
         "score_reason",
+        "production_health_score",
+        "production_grade",
+        "production_grade_provisional",
+        "production_score_state",
+        "production_score_reason",
+        "production_actionable_findings",
+        "production_critical_findings",
+        "production_high_findings",
+        "production_medium_findings",
+        "production_low_findings",
         "critical",
         "high",
         "medium",
@@ -955,9 +1046,22 @@ def _csv_row(result: RepositoryAnalysisResult, output_dir: Path) -> dict[str, in
         "category_evidence": "; ".join(result.category_evidence),
         "health_score": result.health_score if result.health_score is not None else "",
         "grade": result.grade,
+        "grade_provisional": _csv_bool(result.grade_provisional),
         "score_state": result.score_state,
         "coverage_state": result.coverage_state,
         "score_reason": result.score_reason,
+        "production_health_score": result.production_health_score
+        if result.production_health_score is not None
+        else "",
+        "production_grade": result.production_grade,
+        "production_grade_provisional": _csv_bool(result.production_grade_provisional),
+        "production_score_state": result.production_score_state,
+        "production_score_reason": result.production_score_reason,
+        "production_actionable_findings": result.production_actionable_findings,
+        "production_critical_findings": result.production_critical_findings,
+        "production_high_findings": result.production_high_findings,
+        "production_medium_findings": result.production_medium_findings,
+        "production_low_findings": result.production_low_findings,
         "critical": result.critical_findings,
         "high": result.high_findings,
         "medium": result.medium_findings,
@@ -1005,6 +1109,8 @@ def _leaderboard_header(include_comparison: bool) -> str:
         "Category",
         "Health",
         "Grade",
+        "Production Health",
+        "Production Grade",
         "Coverage",
         "Score Status",
         "Critical",
@@ -1023,6 +1129,8 @@ def _leaderboard_separator(include_comparison: bool) -> str:
     columns = [
         "---:",
         "---",
+        "---",
+        "---:",
         "---",
         "---:",
         "---",
@@ -1051,7 +1159,9 @@ def _leaderboard_row(
         result.repository,
         result.category,
         result.health_score if result.health_score is not None else "-",
-        result.grade,
+        _display_grade(result.grade, result.grade_provisional),
+        result.production_health_score if result.production_health_score is not None else "-",
+        _display_grade(result.production_grade, result.production_grade_provisional),
         _coverage_label(result.coverage_state),
         _score_state_label(result.score_state),
         result.critical_findings,
@@ -1079,7 +1189,22 @@ def _leaderboard_row(
 
 
 def _empty_leaderboard_row(include_comparison: bool) -> str:
-    cells = ["-", "No repositories scored", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"]
+    cells = [
+        "-",
+        "No repositories scored",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+    ]
     if include_comparison:
         cells.extend(["-", "-", "-"])
     cells.extend(["-", "-", "-"])
@@ -1359,6 +1484,18 @@ def _score_state_label(value: str) -> str:
         "not_scored_all_scanners_failed": "Not scored",
     }
     return labels.get(value, value)
+
+
+def _display_grade(grade: str, provisional: bool) -> str:
+    return f"{grade}*" if provisional and grade != "N/A" else grade
+
+
+def _grade_provisional(score: int | None, coverage_state: str) -> bool:
+    return score is not None and coverage_state == "partial_coverage"
+
+
+def _csv_bool(value: bool) -> str:
+    return "true" if value else "false"
 
 
 def _csv_number(value: float | int | None) -> str:

@@ -42,6 +42,15 @@ def _result(
     score_state: str = "scored",
     coverage_state: str = "complete_coverage",
     score_reason: str = "All applicable scanners succeeded or were not applicable.",
+    production_health_score: int | None = None,
+    production_score_state: str = "not_scored_no_supported_files",
+    production_coverage_state: str = "not_scored_no_supported_files",
+    production_score_reason: str = "No production-supported files detected.",
+    production_actionable: int = 0,
+    production_critical: int = 0,
+    production_high: int = 0,
+    production_medium: int = 0,
+    production_low: int = 0,
     density: DensityMetrics | None = None,
     top_directories: tuple[dict[str, int | str], ...] = (),
     top_files: tuple[dict[str, int | str], ...] = (),
@@ -76,6 +85,15 @@ def _result(
         score_state=score_state,
         coverage_state=coverage_state,
         score_reason=score_reason,
+        production_health_score=production_health_score,
+        production_score_state=production_score_state,
+        production_coverage_state=production_coverage_state,
+        production_score_reason=production_score_reason,
+        production_actionable_findings=production_actionable,
+        production_critical_findings=production_critical,
+        production_high_findings=production_high,
+        production_medium_findings=production_medium,
+        production_low_findings=production_low,
         total_findings=critical + high + medium + low,
         resolved_findings=resolved,
         recurring_findings=recurring,
@@ -218,6 +236,62 @@ def test_summary_includes_top_directory_and_file_tables(tmp_path: Path) -> None:
     data = json.loads(json_path.read_text(encoding="utf-8"))
     assert data["top_directories"][0]["path"] == "charts/app"
     assert data["top_files"][0]["path"] == "charts/app/values.yaml"
+
+
+def test_summary_marks_partial_grades_provisional_in_markdown_and_json(tmp_path: Path) -> None:
+    complete = _result(
+        index=1,
+        repository="complete",
+        health_score=95,
+        production_health_score=95,
+        production_score_state="scored",
+        production_coverage_state="complete_coverage",
+        production_score_reason="Production Health calculated from production path findings.",
+    )
+    partial = _result(
+        index=2,
+        repository="partial",
+        health_score=94,
+        coverage_state="partial_coverage",
+        production_health_score=94,
+        production_score_state="scored",
+        production_coverage_state="partial_coverage",
+        production_score_reason=(
+            "Production Health calculated from successful scanner output; coverage is incomplete."
+        ),
+    )
+    unscored = _result(
+        index=3,
+        repository="unscored",
+        health_score=None,
+        supported_files=0,
+        score_state="not_scored_no_supported_files",
+        coverage_state="not_scored_no_supported_files",
+        score_reason="No supported files detected.",
+        production_health_score=None,
+    )
+
+    csv_path, markdown_path, json_path = write_analysis_summaries(
+        [complete, partial, unscored],
+        tmp_path,
+    )
+
+    markdown = markdown_path.read_text(encoding="utf-8")
+    assert "| 1 | partial | Terraform module | 94 | A* | 94 | A* | Partial |" in markdown
+    assert "| 2 | complete | Terraform module | 95 | A | 95 | A | Complete |" in markdown
+    assert "N/A*" not in markdown
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    partial_json = next(
+        result for result in data["repository_results"] if result["repository"] == "partial"
+    )
+    assert partial_json["grade"] == "A"
+    assert partial_json["grade_provisional"] is True
+    assert partial_json["production_grade"] == "A"
+    assert partial_json["production_grade_provisional"] is True
+    rows = {row["repository"]: row for row in csv.DictReader(csv_path.open(encoding="utf-8"))}
+    assert rows["partial"]["grade"] == "A"
+    assert rows["partial"]["grade_provisional"] == "true"
+    assert rows["partial"]["production_grade_provisional"] == "true"
 
 
 def test_analysis_summary_uses_relative_report_links(tmp_path: Path) -> None:

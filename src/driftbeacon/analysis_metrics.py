@@ -41,6 +41,8 @@ PATH_GROUPS = (
     "charts",
     "unknown",
 )
+PRODUCTION_PATH_GROUP = "production"
+NON_PRODUCTION_PATH_GROUPS = tuple(group for group in PATH_GROUPS if group != PRODUCTION_PATH_GROUP)
 
 PATH_GROUP_SEGMENTS: dict[str, tuple[str, ...]] = {
     "examples": ("examples", "example", "samples", "sample", "demo"),
@@ -235,6 +237,73 @@ def evaluate_score(
     )
 
 
+def evaluate_production_score(
+    findings: list[Finding],
+    *,
+    supported_files: Sequence[Path],
+    scanner_results: Sequence[ScannerResult],
+) -> ScoreEvaluation:
+    """Apply score eligibility to production-only findings and supported files."""
+
+    score = evaluate_score(
+        production_findings(findings),
+        supported_file_count=len(production_supported_files(supported_files)),
+        scanner_results=scanner_results,
+    )
+    if score.score_state == "not_scored_no_supported_files":
+        return ScoreEvaluation(
+            score.health_score,
+            score.score_state,
+            score.coverage_state,
+            "No production-supported files detected.",
+            score.scanner_results,
+        )
+    if score.score_state == "not_scored_all_scanners_failed":
+        return ScoreEvaluation(
+            score.health_score,
+            score.score_state,
+            score.coverage_state,
+            "All applicable scanners failed for production paths.",
+            score.scanner_results,
+        )
+    if score.coverage_state == "partial_coverage":
+        return ScoreEvaluation(
+            score.health_score,
+            score.score_state,
+            score.coverage_state,
+            "Production Health calculated from successful scanner output; coverage is incomplete.",
+            score.scanner_results,
+        )
+    return ScoreEvaluation(
+        score.health_score,
+        score.score_state,
+        score.coverage_state,
+        "Production Health calculated from production path findings.",
+        score.scanner_results,
+    )
+
+
+def production_findings(findings: Sequence[Finding]) -> list[Finding]:
+    """Return findings whose path group is explicitly production."""
+
+    return [
+        finding
+        for finding in findings
+        if (finding.directory_group or classify_path_group(finding.file_path))
+        == PRODUCTION_PATH_GROUP
+    ]
+
+
+def production_supported_files(supported_files: Sequence[Path]) -> list[Path]:
+    """Return supported files whose path group is explicitly production."""
+
+    return [
+        path
+        for path in supported_files
+        if classify_path_group(path.as_posix()) == PRODUCTION_PATH_GROUP
+    ]
+
+
 def density_metrics(findings: Sequence[Finding], supported_files: Sequence[Path]) -> DensityMetrics:
     actionable = actionable_active_findings(list(findings))
     supported_count = len(supported_files)
@@ -374,12 +443,18 @@ def classify_repository(
         evidence.append("Kubernetes controller/operator markers detected")
         return CategoryResult("Kubernetes application or controller", "high", tuple(evidence))
 
+    if _looks_like_terraform_learning_repository(repo_name) and "terraform" in file_kinds:
+        evidence.append("repository name indicates Terraform learning material")
+        return CategoryResult("Terraform examples or guides", "high", tuple(evidence))
+
     if "terraform" in file_kinds and "kubernetes" in file_kinds:
         evidence.append("both Terraform and Kubernetes files are present")
         return CategoryResult("Mixed infrastructure repository", "medium", tuple(evidence))
 
-    if _looks_like_terraform_module(repo_name, repository_path, files):
-        evidence.append("root Terraform module files detected")
+    if _looks_like_terraform_module(name, repository_path, files):
+        evidence.append("Terraform module structure detected")
+        if name.startswith("terraform-aws-modules/terraform-aws-"):
+            evidence.append("terraform-aws-modules organisation module naming detected")
         return CategoryResult("Terraform module", "high", tuple(evidence))
 
     if _is_examples_repository(name, files):
@@ -537,16 +612,28 @@ def _is_examples_repository(repository: str, supported_files: Sequence[Path]) ->
     return bool(supported_files) and groups["examples"] >= max(2, len(supported_files) // 2)
 
 
+def _looks_like_terraform_learning_repository(repo_name: str) -> bool:
+    return repo_name.startswith("learn-terraform-")
+
+
 def _looks_like_terraform_module(
-    repo_name: str,
+    repository: str,
     repository_path: Path,
     supported_files: Sequence[Path],
 ) -> bool:
+    repo_name = repository.rsplit("/", 1)[-1]
     root_tf = [
         path
         for path in supported_files
         if path.parent.as_posix() == "." and path.suffix == ".tf"
     ]
+    module_tf = [
+        path
+        for path in supported_files
+        if path.parts[:1] == ("modules",) and path.suffix == ".tf"
+    ]
+    if repository.startswith("terraform-aws-modules/terraform-aws-"):
+        return bool(root_tf or module_tf)
     if repo_name.startswith(("terraform-aws-", "terraform-google-", "terraform-azurerm-")):
         return bool(root_tf)
     return bool(root_tf) and any(path.name in {"variables.tf", "outputs.tf"} for path in root_tf)

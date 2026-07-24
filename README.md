@@ -192,7 +192,7 @@ The first analysis run is an initial baseline, so the summary shows `Total Findi
 - `raw_vs_deduplicated_counts`
 - `repository_results`
 
-Each repository row includes `health_score`, `grade`, `score_state`, `coverage_state`, `score_reason`, `supported_files_scanned`, `affected_supported_files`, `affected_file_percentage`, `findings_per_100_supported_files`, `findings_per_affected_file`, `repository_category`, `category_confidence`, `category_evidence`, `scanner_results`, `finding_source_breakdown`, `directory_group_breakdown`, `excluded_finding_counts`, and `score_formula_version`.
+Each repository row includes `health_score`, `grade`, `grade_provisional`, `score_state`, `coverage_state`, `score_reason`, `production_health_score`, `production_grade`, `production_grade_provisional`, `production_score_state`, `production_score_reason`, `production_actionable_findings`, `production_critical_findings`, `production_high_findings`, `production_medium_findings`, `production_low_findings`, `supported_files_scanned`, `affected_supported_files`, `affected_file_percentage`, `findings_per_100_supported_files`, `findings_per_affected_file`, `repository_category`, `category_confidence`, `category_evidence`, `scanner_results`, `finding_source_breakdown`, `directory_group_breakdown`, `excluded_finding_counts`, and `score_formula_version`.
 
 Repository analysis is useful for research and triage, but compare repositories carefully. The summary includes repository category, supported file count, affected file count, and findings per 100 supported files because a large Terraform provider, a small module, and a guide repository are not directly comparable by raw finding count. Findings per 100 supported files is a density, not a percentage, and can exceed 100 when one file has multiple findings.
 
@@ -322,7 +322,9 @@ The curve is continuous and monotonic: more actionable findings never improve he
 
 Informational findings, unknown-severity findings, passed checks, skipped scanners, scanner-error records, resolved findings, and exact duplicate fingerprints do not reduce the score. First-scan baseline status does not affect the score; a finding is not penalized just because there is no previous scan yet.
 
-A repository is scored only when DriftBeacon has meaningful coverage. Zero supported files is `not_scored_no_supported_files`, not healthy. If all applicable scanners fail, the repository is `not_scored_all_scanners_failed`. If one applicable scanner succeeds and another fails, the repository is scored with `partial_coverage` and the report warns that the score may be incomplete.
+A repository is scored only when DriftBeacon has meaningful coverage. Zero supported files is `not_scored_no_supported_files`, not healthy. If all applicable scanners fail, the repository is `not_scored_all_scanners_failed`. If one applicable scanner succeeds and another fails, the repository is scored with `partial_coverage` and the report warns that the score may be incomplete. Markdown grades for partial coverage are marked with an asterisk, such as `A*`; JSON and CSV keep the raw grade and set `grade_provisional`.
+
+Overall Health includes all analysed actionable findings. Production Health uses the same `driftbeacon-health-v2` formula but includes only deduplicated actionable findings from paths classified as `production`. Test, fixture, example, generated, vendored, third-party, docs, charts, and unknown paths are not counted in Production Health. Production Health can be unavailable even when Overall Health is valid, and it does not prove deployed infrastructure is safe. Path classification is heuristic and should be reviewed.
 
 Checkov community JSON does not always include native severity. When severity is missing or unrecognized, DriftBeacon records the finding as `unknown` for audit visibility and ignores it in health scoring by default rather than silently promoting it to high risk.
 

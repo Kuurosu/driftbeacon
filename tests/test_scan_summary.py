@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from driftbeacon.models import Finding, ScannerStatus
 from driftbeacon.scan import build_scan_summary
 from driftbeacon.scanners import ScannerExecution
@@ -10,6 +12,7 @@ def _finding(
     severity: str,
     *,
     status: str = "new",
+    file_path: str = "main.tf",
 ) -> Finding:
     return Finding(
         id=f"id-{fingerprint}",
@@ -19,7 +22,7 @@ def _finding(
         description="Test finding",
         severity=severity,  # type: ignore[arg-type]
         category="misconfiguration",
-        file_path="main.tf",
+        file_path=file_path,
         line_start=1,
         resource="aws_example.demo",
         status=status,  # type: ignore[arg-type]
@@ -69,3 +72,24 @@ def test_build_scan_summary_separates_actionable_ignored_and_scanner_audit() -> 
     assert summary["unknown_severity_findings"] == 1
     assert summary["scanner_errors"] == 0
     assert summary["skipped_scanners"] == 1
+
+
+def test_build_scan_summary_includes_production_health() -> None:
+    findings = [
+        _finding("test-1", "high", file_path="tests/main.tf"),
+        _finding("prod-1", "high", file_path="main.tf"),
+    ]
+    executions = [
+        ScannerExecution("checkov", ScannerStatus("checkov", "success", "loaded JSON"), findings)
+    ]
+
+    summary = build_scan_summary(
+        findings,
+        executions,
+        supported_files=[Path("main.tf"), Path("tests/main.tf")],
+    )
+
+    assert summary["production_health_score"] is not None
+    assert summary["production_health_score"] > 0
+    assert summary["production_actionable_findings"] == 1
+    assert summary["production_high_findings"] == 1

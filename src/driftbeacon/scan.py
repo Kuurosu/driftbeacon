@@ -9,22 +9,31 @@ from pathlib import Path
 from typing import Any
 
 from .analysis_metrics import (
+    ScannerResult,
     directory_group_breakdown,
     enrich_findings_for_analysis,
+    evaluate_production_score,
     excluded_finding_counts,
     finding_source_breakdown,
+    production_findings,
+    scanner_result_from_execution,
     top_paths_by_findings,
 )
 from .comparison import compare_scans
 from .config import Config
 from .models import Finding, ScannerStatus, ScanResult
 from .scanners import CheckovScanner, ScannerExecution, TrivyScanner
+from .scanners.base import safe_walk
+from .scanners.checkov import has_relevant_files as checkov_applies
+from .scanners.trivy import DEPENDENCY_FILES
+from .scanners.trivy import has_relevant_files as trivy_applies
 from .scoring import (
     SCORE_FORMULA_VERSION,
     actionable_active_findings,
     calculate_health_score,
     deduplicate_findings_by_fingerprint,
     ignored_active_findings,
+    severity_counts,
 )
 
 
@@ -79,6 +88,15 @@ def run_scan(
     enrich_findings_for_analysis(findings)
     repository, branch, commit_sha = detect_repository_metadata(config.repository_path)
     scanner_statuses = {execution.scanner: execution.status for execution in executions}
+    supported_files = _detect_supported_infrastructure_files(config.repository_path)
+    scanner_results = tuple(
+        scanner_result_from_execution(
+            repository,
+            execution,
+            applicable=_scanner_applicable(execution.scanner, config.repository_path),
+        )
+        for execution in executions
+    )
     scan = ScanResult(
         repository=repository,
         branch=branch,
@@ -88,7 +106,12 @@ def run_scan(
         scanner_statuses=scanner_statuses,
         findings=findings,
         health_score=calculate_health_score(findings),
-        summary=build_scan_summary(findings, executions),
+        summary=build_scan_summary(
+            findings,
+            executions,
+            supported_files=supported_files,
+            scanner_results=scanner_results,
+        ),
     )
     if compare_with_previous:
         compare_scans(scan, None)
@@ -98,6 +121,9 @@ def run_scan(
 def build_scan_summary(
     findings: list[Finding],
     executions: list[ScannerExecution],
+    *,
+    supported_files: list[Path] | None = None,
+    scanner_results: tuple[ScannerResult, ...] = (),
 ) -> dict[str, Any]:
     """Build audit counts for a scan result."""
 
@@ -109,6 +135,14 @@ def build_scan_summary(
         1 for execution in executions if execution.status.status in {"failed", "partial"}
     )
     skipped_scanners = sum(1 for execution in executions if execution.status.status == "skipped")
+    production_only = production_findings(findings)
+    production_actionable = actionable_active_findings(production_only)
+    production_score = evaluate_production_score(
+        findings,
+        supported_files=supported_files or [],
+        scanner_results=scanner_results,
+    )
+    production_counts = severity_counts(production_only)
     return {
         "active_findings": len(actionable),
         "actionable_findings": len(actionable),
@@ -133,6 +167,20 @@ def build_scan_summary(
         "score_state": "scored",
         "coverage_state": "complete_coverage",
         "score_reason": "Score calculated from configured scanner output.",
+        "grade_provisional": False,
+        "production_health_score": production_score.health_score,
+        "production_grade": _health_grade(production_score.health_score),
+        "production_grade_provisional": production_score.coverage_state
+        == "partial_coverage"
+        and production_score.health_score is not None,
+        "production_score_state": production_score.score_state,
+        "production_coverage_state": production_score.coverage_state,
+        "production_score_reason": production_score.score_reason,
+        "production_actionable_findings": len(production_actionable),
+        "production_critical_findings": production_counts["critical"],
+        "production_high_findings": production_counts["high"],
+        "production_medium_findings": production_counts["medium"],
+        "production_low_findings": production_counts["low"],
         "finding_source_breakdown": finding_source_breakdown(findings),
         "directory_group_breakdown": directory_group_breakdown(findings),
         "excluded_finding_counts": excluded_finding_counts(findings),
@@ -143,6 +191,71 @@ def build_scan_summary(
 
 def _sum_diagnostics(diagnostics: list[dict[str, int]], key: str) -> int:
     return sum(value.get(key, 0) for value in diagnostics)
+
+
+def _scanner_applicable(scanner: str, repository_path: Path) -> bool:
+    if scanner == "checkov":
+        return checkov_applies(repository_path)
+    if scanner == "trivy":
+        return trivy_applies(repository_path)
+    return True
+
+
+def _detect_supported_infrastructure_files(repository_path: Path) -> list[Path]:
+    files: list[Path] = []
+    for path in safe_walk(repository_path):
+        if _is_supported_file(path):
+            files.append(path.relative_to(repository_path))
+    return sorted(files)
+
+
+def _is_supported_file(path: Path) -> bool:
+    name = path.name.lower()
+    suffix = path.suffix.lower()
+    if name in DEPENDENCY_FILES:
+        return True
+    if name == "dockerfile" or name.startswith("dockerfile."):
+        return True
+    if suffix in {".tf", ".tfvars"} or path.name.endswith(".tf.json"):
+        return True
+    if suffix in {".yaml", ".yml", ".json"}:
+        return _looks_like_infrastructure_file(path)
+    return False
+
+
+def _looks_like_infrastructure_file(path: Path) -> bool:
+    try:
+        sample = path.read_text(encoding="utf-8", errors="ignore")[:8192].lower()
+    except OSError:
+        return False
+    return any(
+        marker in sample
+        for marker in (
+            "apiversion:",
+            "kind:",
+            "awstemplateformatversion",
+            "type: aws::",
+            "kustomization",
+            "helm.sh/chart",
+            "docker-compose",
+            "services:",
+            "resources:",
+        )
+    )
+
+
+def _health_grade(score: int | None) -> str:
+    if score is None:
+        return "N/A"
+    if score >= 90:
+        return "A"
+    if score >= 80:
+        return "B"
+    if score >= 70:
+        return "C"
+    if score >= 60:
+        return "D"
+    return "F"
 
 
 def detect_repository_metadata(repository_path: Path) -> tuple[str, str, str]:

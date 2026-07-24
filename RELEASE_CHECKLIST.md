@@ -4,7 +4,7 @@ Status date: 2026-07-24
 
 ## Validation
 
-- [x] `python -m pytest` passed: 63 tests.
+- [x] `python -m pytest` passed: 71 tests.
 - [x] `ruff check .` passed.
 - [x] `mypy src` passed: 20 source files.
 - [x] `make run-sample` passed and generated `.driftbeacon-sample/report.md`.
