@@ -133,18 +133,44 @@ def generate_job_summary(report_markdown: str, max_chars: int = 6000) -> str:
 def _finding_lines(
     index: int, item: PrioritisedFinding, *, has_baseline: bool
 ) -> list[str]:
+    details = prioritised_finding_details(item, has_baseline=has_baseline)
+    return [
+        f"### {index}. {details['title']}",
+        f"**Rule ID:** {details['rule_id']}",
+        f"**Severity:** {details['severity']} | **Category:** {details['category']}",
+        f"**Location:** {details['location']}",
+        f"**Directory group:** {details['directory_group']}",
+        f"**Finding source:** {details['finding_source']}",
+        f"**Why:** {details['why']}",
+        f"**Action:** {details['action']}",
+        f"**Status:** {details['status']}",
+        "",
+    ]
+
+
+def prioritised_finding_details(
+    item: PrioritisedFinding,
+    *,
+    has_baseline: bool,
+) -> dict[str, str]:
+    """Return shared explanation fields for Markdown and Slack."""
+
     finding = item.finding
     reason = redact_secrets(item.reason)
     if not has_baseline and reason.startswith("New "):
         reason = "Baseline " + reason.removeprefix("New ")
-    return [
-        f"### {index}. {redact_secrets(finding.title)}",
-        f"**Severity:** {_severity_label(finding)} | **Category:** {finding.category}",
-        f"**Location:** {_location(finding)}",
-        f"**Why:** {reason}",
-        f"**Action:** {_recommended_action(finding)}",
-        "",
-    ]
+    return {
+        "title": redact_secrets(finding.title),
+        "rule_id": redact_secrets(finding.rule_id),
+        "severity": _severity_label(finding),
+        "category": redact_secrets(finding.category),
+        "location": _location(finding),
+        "directory_group": redact_secrets(finding.directory_group or "unknown"),
+        "finding_source": source_label(finding.finding_family or finding.scanner),
+        "why": reason,
+        "action": _recommended_action(finding),
+        "status": redact_secrets(finding.status),
+    }
 
 
 def _recommended_action(finding: Finding) -> str:

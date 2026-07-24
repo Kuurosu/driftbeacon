@@ -218,6 +218,7 @@ class ScanResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "report_type": "repository",
             "repository": self.repository,
             "branch": self.branch,
             "commit_sha": self.commit_sha,

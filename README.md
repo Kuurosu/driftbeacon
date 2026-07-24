@@ -242,6 +242,13 @@ export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
 driftbeacon send-slack --report-file .driftbeacon-sample/report.md
 ```
 
+`send-slack` supports both single-repository reports and bulk repository-analysis summaries.
+When you pass Markdown, DriftBeacon first looks for sibling structured JSON so Slack can use the
+full context:
+
+- `.driftbeacon/report.md` -> `.driftbeacon/current-scan.json` and `comparison-summary.json`
+- `.driftbeacon-analysis/analysis-summary.md` -> `.driftbeacon-analysis/analysis-summary.json`
+
 Never commit `.env` or a real webhook URL. DriftBeacon redacts common webhook and token patterns before reporting errors.
 
 ## Configuration

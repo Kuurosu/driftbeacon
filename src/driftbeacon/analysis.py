@@ -719,6 +719,7 @@ def analysis_summary_json(
     timestamp = generated_at or datetime.now(UTC)
     failures = [result for result in results if not result.succeeded]
     return {
+        "report_type": "portfolio_summary",
         "schema_version": "2.0",
         "metadata": {
             "scan_date": timestamp.isoformat(),

@@ -18,7 +18,7 @@ from .prioritise import prioritise_findings
 from .reporting import generate_job_summary, generate_report
 from .scan import run_scan
 from .scanners import ScannerExecution
-from .slack import send_slack_report
+from .slack import send_slack_report_from_path
 from .storage import LocalStorage, StorageError
 
 
@@ -86,7 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     compare_parser.add_argument("--output-file", type=Path)
 
     slack_parser = subparsers.add_parser(
-        "send-slack", help="Send an existing Markdown report to Slack."
+        "send-slack", help="Send an existing repository or portfolio report to Slack."
     )
     slack_parser.add_argument("--report-file", required=True, type=Path)
     slack_parser.add_argument("--slack-webhook-env", default="SLACK_WEBHOOK_URL")
@@ -170,8 +170,8 @@ def command_run(args: argparse.Namespace) -> int:
     if args.github_summary_file is not None:
         _append_github_summary(Path(args.github_summary_file), generate_job_summary(report))
 
-    slack_result = send_slack_report(
-        report,
+    slack_result = send_slack_report_from_path(
+        report_path,
         webhook_env_var=config.slack_webhook_environment_variable,
         enabled=config.slack_enabled,
     )
@@ -221,8 +221,10 @@ def command_compare(args: argparse.Namespace) -> int:
 
 
 def command_send_slack(args: argparse.Namespace) -> int:
-    report = Path(args.report_file).read_text(encoding="utf-8")
-    result = send_slack_report(report, webhook_env_var=args.slack_webhook_env)
+    result = send_slack_report_from_path(
+        Path(args.report_file),
+        webhook_env_var=args.slack_webhook_env,
+    )
     print(result.message)
     return 0 if result.sent or result.message.startswith("Slack skipped") else 1
 
