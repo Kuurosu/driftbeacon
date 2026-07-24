@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -54,12 +55,20 @@ class ScannerExecution:
     raw_json: Any | None = None
     stdout: str = ""
     stderr: str = ""
+    diagnostics: dict[str, int] | None = None
 
 
 def executable_exists(name: str) -> bool:
     """Return whether a scanner executable is available on PATH."""
 
     return shutil.which(name) is not None
+
+
+def executable_path(name: str) -> str | None:
+    """Return the resolved executable path when available."""
+
+    path = shutil.which(name)
+    return str(Path(path).resolve()) if path is not None else None
 
 
 def safe_walk(repository_path: Path) -> list[Path]:
@@ -121,10 +130,21 @@ def run_subprocess(
             timeout=timeout_seconds,
             check=False,
         )
+    except OSError as exc:
+        duration = time.monotonic() - start
+        message = truncate(_scrub_repository_path(redact_secrets(str(exc)), cwd), 240)
+        return (
+            "",
+            "",
+            None,
+            ScannerStatus(scanner, "failed", f"scanner could not start: {message}", duration),
+            duration,
+        )
     except subprocess.TimeoutExpired as exc:
         duration = time.monotonic() - start
         stdout = exc.stdout if isinstance(exc.stdout, str) else ""
         stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        stderr = _scrub_repository_path(redact_secrets(stderr), cwd)
         return (
             stdout,
             stderr,
@@ -138,7 +158,7 @@ def run_subprocess(
             duration,
         )
     duration = time.monotonic() - start
-    stderr = redact_secrets(completed.stderr)
+    stderr = _scrub_repository_path(redact_secrets(completed.stderr), cwd)
     if completed.returncode in acceptable_exit_codes:
         return (
             completed.stdout,
@@ -164,3 +184,16 @@ def run_subprocess(
         ),
         duration,
     )
+
+
+def _scrub_repository_path(value: str, repository_path: Path) -> str:
+    """Remove local checkout paths from scanner status messages."""
+
+    cleaned = value
+    candidates = {repository_path.as_posix()}
+    with suppress(OSError, RuntimeError):
+        candidates.add(repository_path.resolve().as_posix())
+    for candidate in sorted(candidates, key=len, reverse=True):
+        if candidate:
+            cleaned = cleaned.replace(candidate, ".")
+    return cleaned

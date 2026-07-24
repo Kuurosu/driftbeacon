@@ -9,9 +9,14 @@ from pathlib import Path
 
 from .comparison import compare_scans
 from .config import Config
-from .models import ScannerStatus, ScanResult, active_findings
+from .models import Finding, ScannerStatus, ScanResult
 from .scanners import CheckovScanner, ScannerExecution, TrivyScanner
-from .scoring import calculate_health_score
+from .scoring import (
+    actionable_active_findings,
+    calculate_health_score,
+    deduplicate_findings_by_fingerprint,
+    ignored_active_findings,
+)
 
 
 def run_scan(
@@ -73,17 +78,52 @@ def run_scan(
         scanner_statuses=scanner_statuses,
         findings=findings,
         health_score=calculate_health_score(findings),
-        summary={
-            "active_findings": len(active_findings(findings)),
-            "new_findings": len(findings),
-            "recurring_findings": 0,
-            "resolved_findings": 0,
-            "severity_changes": 0,
-        },
+        summary=build_scan_summary(findings, executions),
     )
     if compare_with_previous:
         compare_scans(scan, None)
     return scan, executions
+
+
+def build_scan_summary(
+    findings: list[Finding],
+    executions: list[ScannerExecution],
+) -> dict[str, int | str]:
+    """Build audit counts for a scan result."""
+
+    actionable = actionable_active_findings(findings)
+    ignored = ignored_active_findings(findings)
+    deduplicated = deduplicate_findings_by_fingerprint(findings)
+    diagnostics = [execution.diagnostics or {} for execution in executions]
+    scanner_errors = sum(
+        1 for execution in executions if execution.status.status in {"failed", "partial"}
+    )
+    skipped_scanners = sum(1 for execution in executions if execution.status.status == "skipped")
+    return {
+        "active_findings": len(actionable),
+        "actionable_findings": len(actionable),
+        "ignored_findings": len(ignored),
+        "deduplicated_findings": len(deduplicated),
+        "deduplicated_active_findings": len(actionable),
+        "raw_scanner_results": _sum_diagnostics(diagnostics, "raw_results"),
+        "normalised_findings": _sum_diagnostics(diagnostics, "normalised_findings"),
+        "duplicate_findings_removed": _sum_diagnostics(
+            diagnostics, "duplicate_findings_removed"
+        ),
+        "passed_checks": _sum_diagnostics(diagnostics, "passed_results"),
+        "informational_findings": _sum_diagnostics(diagnostics, "informational_findings"),
+        "unknown_severity_findings": _sum_diagnostics(diagnostics, "unknown_severity_findings"),
+        "scanner_errors": scanner_errors,
+        "skipped_scanners": skipped_scanners,
+        "new_findings": 0,
+        "recurring_findings": 0,
+        "resolved_findings": 0,
+        "severity_changes": 0,
+    }
+
+
+def _sum_diagnostics(diagnostics: list[dict[str, int]], key: str) -> int:
+    return sum(value.get(key, 0) for value in diagnostics)
 
 
 def detect_repository_metadata(repository_path: Path) -> tuple[str, str, str]:

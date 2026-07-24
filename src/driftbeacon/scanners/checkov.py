@@ -6,12 +6,12 @@ from pathlib import Path
 from typing import Any
 
 from driftbeacon.models import ScannerStatus
-from driftbeacon.normalise import normalise_checkov
+from driftbeacon.normalise import normalise_checkov_with_diagnostics
 
 from .base import (
     SCANNER_SKIP_PATTERNS,
     ScannerExecution,
-    executable_exists,
+    executable_path,
     load_json_file,
     parse_json_output,
     run_subprocess,
@@ -35,14 +35,15 @@ class CheckovScanner:
                 ),
                 findings=[],
             )
-        if not executable_exists("checkov"):
+        checkov_path = executable_path("checkov")
+        if checkov_path is None:
             return ScannerExecution(
                 scanner=self.name,
                 status=ScannerStatus(self.name, "skipped", "checkov executable not found on PATH"),
                 findings=[],
             )
 
-        command = ["checkov", "-d", str(repository_path), "-o", "json", "--quiet"]
+        command = [checkov_path, "-d", str(repository_path), "-o", "json", "--quiet"]
         command.append("--skip-download")
         for pattern in SCANNER_SKIP_PATTERNS:
             command.extend(["--skip-path", pattern])
@@ -75,24 +76,33 @@ def execution_from_json_output(
     data, parse_status = parse_json_output("checkov", stdout)
     if data is None:
         return ScannerExecution("checkov", parse_status, [], stdout=stdout, stderr=stderr)
-    findings = normalise_checkov(data, repository_path)
+    result = normalise_checkov_with_diagnostics(data, repository_path)
     status = base_status or parse_status
     if base_status is not None and base_status.status != "success":
         status = ScannerStatus(
             "checkov", base_status.status, base_status.message, base_status.duration_seconds
         )
     return ScannerExecution(
-        "checkov", status, findings, raw_json=data, stdout=stdout, stderr=stderr
+        "checkov",
+        status,
+        result.findings,
+        raw_json=data,
+        stdout=stdout,
+        stderr=stderr,
+        diagnostics=result.diagnostics.to_dict(),
     )
 
 
 def execution_from_data(data: Any, repository_path: Path) -> ScannerExecution:
-    findings = normalise_checkov(data, repository_path)
+    result = normalise_checkov_with_diagnostics(data, repository_path)
     return ScannerExecution(
         scanner="checkov",
-        status=ScannerStatus("checkov", "success", f"loaded {len(findings)} findings from JSON"),
-        findings=findings,
+        status=ScannerStatus(
+            "checkov", "success", f"loaded {len(result.findings)} findings from JSON"
+        ),
+        findings=result.findings,
         raw_json=data,
+        diagnostics=result.diagnostics.to_dict(),
     )
 
 

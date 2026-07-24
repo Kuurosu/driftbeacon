@@ -248,6 +248,7 @@ def _run_repository_analysis(git_urls: Sequence[str], args: argparse.Namespace) 
     )
     print(f"Saved analysis summary CSV to {result.csv_path}")
     print(f"Saved analysis summary Markdown to {result.markdown_path}")
+    print(f"Saved analysis summary JSON to {result.json_path}")
     for line in result.final_summary_lines():
         print(line)
     return 0

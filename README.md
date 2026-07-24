@@ -147,10 +147,13 @@ Repository analysis mode:
 - Detects supported infrastructure, Docker, Kubernetes, CloudFormation, Terraform, and dependency files.
 - Runs the same Checkov and Trivy scanner adapters used by `driftbeacon run`.
 - Writes per-repository `current-scan.json`, `comparison-summary.json`, and `report.md`.
+- Writes `analysis-summary.csv`, `analysis-summary.md`, and `analysis-summary.json`.
 - Prints progress such as `[12/50] Scanning terraform-aws-vpc...`.
 - Prints a one-line result per repository with health score and severity counts.
 - Continues when one repository fails.
 - Deletes temporary clones unless `--keep` is passed.
+- Uses `owner--repo` output directories so repositories with the same name do not collide.
+- Reuses an existing per-repository `current-scan.json` in the output directory as the comparison baseline.
 
 By default, analysis output is written to `.driftbeacon-analysis/`:
 
@@ -158,13 +161,25 @@ By default, analysis output is written to `.driftbeacon-analysis/`:
 .driftbeacon-analysis/
   analysis-summary.csv
   analysis-summary.md
+  analysis-summary.json
   repository-a/
     current-scan.json
     comparison-summary.json
     report.md
 ```
 
-The Markdown summary is ranked by lowest health score first. The CSV contains one row per repository, including failed repositories and their error message.
+The first analysis run is an initial baseline, so the summary shows `Total Findings` rather than treating everything as newly introduced. Later runs against the same output directory show `New`, `Resolved`, and `Recurring` columns. The Markdown summary is ranked by lowest health score first and uses relative report links. The CSV contains one row per repository, including failed repositories and their error message. The JSON summary has stable top-level fields:
+
+- `metadata`
+- `aggregate_statistics`
+- `severity_totals`
+- `scanner_coverage`
+- `common_findings`
+- `failure_details`
+- `raw_vs_deduplicated_counts`
+- `repository_results`
+
+Repository analysis is useful for research and triage, but compare repositories carefully. The summary includes repository category, supported file count, and findings per 100 supported files because a large Terraform provider, a small module, and a guide repository are not directly comparable by raw finding count.
 
 ## GitHub Installation
 
@@ -276,18 +291,22 @@ Nothing under `examples/demo-infrastructure/` should be deployed. The Terraform 
 
 ## Health Score
 
-Active findings add weighted raw penalties:
+Health starts at `100`. DriftBeacon subtracts penalties for deduplicated active actionable findings only:
 
-- Critical: 25
-- High: 12
-- Medium: 5
-- Low: 2
-- Info: 0
-- Unknown: 3
+- Critical: `30` each, capped at `70`
+- High: `12` each, capped at `50`
+- Medium: `4` each, capped at `30`
+- Low: `0.25` each, capped at `10`
 
-New findings use a 1.2 multiplier. Recurring findings use a 1.0 multiplier. Resolved findings do not count against the active score.
+The final score is:
 
-DriftBeacon converts raw penalties into a 0 to 100 score with a diminishing-returns curve. This keeps very noisy repositories from flattening to the same score while still making trend deltas visible.
+```text
+max(0, round(100 - min(sum(capped severity penalties), 100)))
+```
+
+Informational findings, unknown-severity findings, passed checks, scanner metadata, resolved findings, and exact duplicate fingerprints do not reduce the score. First-scan baseline status does not affect the score; a finding is not penalized just because there is no previous scan yet.
+
+Checkov community JSON does not always include native severity. When severity is missing or unrecognized, DriftBeacon records the finding as `unknown` for audit visibility and ignores it in health scoring by default rather than silently promoting it to high risk.
 
 The report trend compares the current score with the previous scan score.
 
@@ -330,7 +349,7 @@ Install the missing scanner, or use `--checkov-json` and `--trivy-json` for fixt
 
 No previous baseline:
 
-The first scan labels all current findings as new. The weekly workflow stores the current scan in cache for the next run.
+The first scan establishes the baseline. Reports do not describe first-scan findings as newly introduced. The weekly workflow stores the current scan in cache for the next run.
 
 Slack did not send:
 

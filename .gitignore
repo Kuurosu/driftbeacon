@@ -3,6 +3,10 @@
 .driftbeacon-demo/
 .driftbeacon-sample/
 .driftbeacon-history/
+driftbeacon-analysis/
+analysis-summary.csv
+analysis-summary.md
+analysis-summary.json
 **/.driftbeacon/
 **/.driftbeacon-analysis/
 **/.driftbeacon-demo/

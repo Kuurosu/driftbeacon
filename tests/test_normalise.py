@@ -4,7 +4,12 @@ from pathlib import Path
 
 from conftest import load_fixture
 
-from driftbeacon.normalise import normalise_checkov, normalise_trivy, stable_fingerprint
+from driftbeacon.normalise import (
+    normalise_checkov,
+    normalise_checkov_with_diagnostics,
+    normalise_trivy,
+    stable_fingerprint,
+)
 
 
 def test_checkov_normalisation_extracts_core_fields() -> None:
@@ -68,3 +73,49 @@ def test_stable_fingerprint_ignores_timestamps_and_text() -> None:
 
     assert first == second
     assert first != moved
+
+
+def test_checkov_diagnostics_count_passed_and_duplicate_results() -> None:
+    duplicate = {
+        "check_id": "CKV_AWS_20",
+        "check_name": "S3 bucket allows public read access",
+        "file_path": "/terraform/s3.tf",
+        "file_line_range": [7, 11],
+        "resource": "aws_s3_bucket_acl.public",
+        "severity": "HIGH",
+    }
+    result = normalise_checkov_with_diagnostics(
+        {
+            "results": {
+                "failed_checks": [duplicate, dict(duplicate)],
+                "passed_checks": [{"check_id": "CKV_AWS_18"}],
+            }
+        }
+    )
+
+    assert len(result.findings) == 1
+    assert result.diagnostics.raw_results == 3
+    assert result.diagnostics.passed_results == 1
+    assert result.diagnostics.normalised_findings == 2
+    assert result.diagnostics.deduplicated_findings == 1
+    assert result.diagnostics.duplicate_findings_removed == 1
+
+
+def test_unknown_checkov_severity_is_audited_not_promoted() -> None:
+    result = normalise_checkov_with_diagnostics(
+        {
+            "results": {
+                "failed_checks": [
+                    {
+                        "check_id": "CKV_UNKNOWN",
+                        "check_name": "Scanner did not provide severity",
+                        "file_path": "/terraform/main.tf",
+                        "resource": "aws_example.demo",
+                    }
+                ]
+            }
+        }
+    )
+
+    assert result.findings[0].severity == "unknown"
+    assert result.diagnostics.unknown_severity_findings == 1

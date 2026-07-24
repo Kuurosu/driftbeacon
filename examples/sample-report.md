@@ -1,46 +1,56 @@
 # DriftBeacon Report
 
 ## At a glance
-**Repository:** Kuurosu/driftbeacon  
-**Branch:** main  
-**Commit:** `26931dfb1c48`  
-**Health score:** 50/100 (down 21 points)  
-**Active findings:** 6  
-**Trend:** 4 new findings, 2 recurring findings, 1 resolved finding, health score down 21 points
+**Repository:** Kuurosu/driftbeacon
+**Branch:** main
+**Commit:** `cf1f0a417989`
+**Health score:** 4/100 (down 67 points)
+**Active findings:** 6
+**Trend:** 4 new findings, 2 recurring findings, 1 resolved finding, health score down 67 points
 
 ## What happened
-Scanner status: 2 successful scanners. DriftBeacon normalized 6 active findings. Health is 50/100.
+Scanner status: 2 successful scanners. DriftBeacon normalized 6 active findings. Health is 4/100.
 
 ## What changed
 - 4 new findings
 - 2 recurring findings
 - 1 resolved finding
 - 1 severity change
-- Health score down 21 points
+- Health score down 67 points
 
 ## Fix these first
 ### 1. AWS Access Key ID
-**Severity:** Critical | **Category:** secret  
-**Location:** terraform/production/secrets.tf:4  
-**Why:** New critical-severity secret issue in a production-like path with remediation guidance.  
+**Severity:** Critical | **Category:** secret
+**Location:** terraform/production/secrets.tf:4
+**Why:** New critical-severity secret issue in a production-like path with remediation guidance.
 **Action:** Remove the hardcoded secret and rotate it if it was committed.
 
 ### 2. Container allows privilege escalation
-**Severity:** Critical | **Category:** container  
-**Location:** k8s/production/deployment.yaml:31  
-**Why:** New critical-severity container issue in a production-like path with remediation guidance.  
+**Severity:** Critical | **Category:** container
+**Location:** k8s/production/deployment.yaml:31
+**Why:** New critical-severity container issue in a production-like path with remediation guidance.
 **Action:** Set allowPrivilegeEscalation to false.
 
 ### 3. S3 bucket allows public read access
-**Severity:** High | **Category:** storage  
-**Location:** terraform/production/s3.tf:7  
-**Why:** New high-severity storage issue in a production-like path with broad blast radius indicators with remediation guidance.  
+**Severity:** High | **Category:** storage
+**Location:** terraform/production/s3.tf:7
+**Why:** New high-severity storage issue in a production-like path with broad blast radius indicators with remediation guidance.
 **Action:** Disable public ACLs and enable S3 Block Public Access.
 
 
 ## Scanner status
 - Checkov: Success: loaded 3 findings from JSON
 - Trivy: Success: loaded 3 findings from JSON
+
+## Finding audit
+- Actionable active findings: 6
+- Ignored informational or unknown-severity findings: 0
+- Passed checks: 0
+- Duplicate findings removed: 0
+- Scanner errors: 0
+
+## Scoring model
+Health starts at 100 and subtracts capped penalties for deduplicated active critical, high, medium, and low findings. Informational findings, unknown-severity findings, passed checks, scanner metadata, and first-scan baseline status do not reduce the score.
 
 ## Recently resolved
 - High: Security group allows unrestricted SSH (terraform/production/security-group.tf:42)

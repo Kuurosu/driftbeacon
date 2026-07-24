@@ -6,12 +6,12 @@ from pathlib import Path
 from typing import Any
 
 from driftbeacon.models import ScannerStatus
-from driftbeacon.normalise import normalise_trivy
+from driftbeacon.normalise import normalise_trivy_with_diagnostics
 
 from .base import (
     SCANNER_SKIP_PATTERNS,
     ScannerExecution,
-    executable_exists,
+    executable_path,
     load_json_file,
     parse_json_output,
     run_subprocess,
@@ -50,7 +50,8 @@ class TrivyScanner:
                 ),
                 findings=[],
             )
-        if not executable_exists("trivy"):
+        trivy_path = executable_path("trivy")
+        if trivy_path is None:
             return ScannerExecution(
                 scanner=self.name,
                 status=ScannerStatus(self.name, "skipped", "trivy executable not found on PATH"),
@@ -61,7 +62,7 @@ class TrivyScanner:
         if self.secret_scanning:
             scanners += ",secret"
         command = [
-            "trivy",
+            trivy_path,
             "fs",
             "--format",
             "json",
@@ -103,22 +104,33 @@ def execution_from_json_output(
     data, parse_status = parse_json_output("trivy", stdout)
     if data is None:
         return ScannerExecution("trivy", parse_status, [], stdout=stdout, stderr=stderr)
-    findings = normalise_trivy(data, repository_path)
+    result = normalise_trivy_with_diagnostics(data, repository_path)
     status = base_status or parse_status
     if base_status is not None and base_status.status != "success":
         status = ScannerStatus(
             "trivy", base_status.status, base_status.message, base_status.duration_seconds
         )
-    return ScannerExecution("trivy", status, findings, raw_json=data, stdout=stdout, stderr=stderr)
+    return ScannerExecution(
+        "trivy",
+        status,
+        result.findings,
+        raw_json=data,
+        stdout=stdout,
+        stderr=stderr,
+        diagnostics=result.diagnostics.to_dict(),
+    )
 
 
 def execution_from_data(data: Any, repository_path: Path) -> ScannerExecution:
-    findings = normalise_trivy(data, repository_path)
+    result = normalise_trivy_with_diagnostics(data, repository_path)
     return ScannerExecution(
         scanner="trivy",
-        status=ScannerStatus("trivy", "success", f"loaded {len(findings)} findings from JSON"),
-        findings=findings,
+        status=ScannerStatus(
+            "trivy", "success", f"loaded {len(result.findings)} findings from JSON"
+        ),
+        findings=result.findings,
         raw_json=data,
+        diagnostics=result.diagnostics.to_dict(),
     )
 
 

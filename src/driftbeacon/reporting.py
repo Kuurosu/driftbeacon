@@ -6,6 +6,7 @@ from .config import DEFAULT_PRODUCTION_PATTERNS
 from .models import ComparisonSummary, Finding, ScanResult
 from .prioritise import PrioritisedFinding, prioritise_findings
 from .redaction import redact_secrets, truncate
+from .scoring import actionable_active_findings, actionable_findings
 
 
 def generate_report(
@@ -28,11 +29,11 @@ def generate_report(
         "# DriftBeacon Report",
         "",
         "## At a glance",
-        f"**Repository:** {redact_secrets(scan.repository)}  ",
-        f"**Branch:** {redact_secrets(scan.branch)}  ",
-        f"**Commit:** `{scan.commit_sha[:12]}`  ",
-        f"**Health score:** {scan.health_score}/100 ({_health_trend(comparison)})  ",
-        f"**Active findings:** {active_count}  ",
+        f"**Repository:** {redact_secrets(scan.repository)}",
+        f"**Branch:** {redact_secrets(scan.branch)}",
+        f"**Commit:** `{scan.commit_sha[:12]}`",
+        f"**Health score:** {scan.health_score}/100 ({_health_trend(comparison)})",
+        f"**Active findings:** {active_count}",
         f"**Trend:** {_change_sentence(comparison)}",
         "",
         "## What happened",
@@ -44,7 +45,7 @@ def generate_report(
     lines.extend(["", "## Fix these first"])
     if top:
         for index, item in enumerate(top, start=1):
-            lines.extend(_finding_lines(index, item))
+            lines.extend(_finding_lines(index, item, has_baseline=comparison.has_baseline))
     else:
         lines.append("No active findings were detected.")
 
@@ -54,6 +55,17 @@ def generate_report(
         message = redact_secrets(status.message)
         suffix = f": {message}" if message else ""
         lines.append(f"- {status.name.capitalize()}: {pretty_state}{suffix}")
+
+    lines.extend(["", "## Finding audit"])
+    lines.extend(_audit_lines(scan))
+
+    lines.extend(["", "## Scoring model"])
+    lines.append(
+        "Health starts at 100 and subtracts capped penalties for deduplicated active "
+        "critical, high, medium, and low findings. Informational findings, unknown-severity "
+        "findings, passed checks, scanner metadata, and first-scan baseline status do not "
+        "reduce the score."
+    )
 
     if comparison.resolved_findings:
         lines.extend(["", "## Recently resolved"])
@@ -78,13 +90,18 @@ def generate_job_summary(report_markdown: str, max_chars: int = 6000) -> str:
     )
 
 
-def _finding_lines(index: int, item: PrioritisedFinding) -> list[str]:
+def _finding_lines(
+    index: int, item: PrioritisedFinding, *, has_baseline: bool
+) -> list[str]:
     finding = item.finding
+    reason = redact_secrets(item.reason)
+    if not has_baseline and reason.startswith("New "):
+        reason = "Baseline " + reason.removeprefix("New ")
     return [
         f"### {index}. {redact_secrets(finding.title)}",
-        f"**Severity:** {_severity_label(finding)} | **Category:** {finding.category}  ",
-        f"**Location:** {_location(finding)}  ",
-        f"**Why:** {redact_secrets(item.reason)}  ",
+        f"**Severity:** {_severity_label(finding)} | **Category:** {finding.category}",
+        f"**Location:** {_location(finding)}",
+        f"**Why:** {reason}",
         f"**Action:** {_recommended_action(finding)}",
         "",
     ]
@@ -106,6 +123,18 @@ def _location(finding: Finding) -> str:
     if finding.resource:
         return redact_secrets(finding.resource)
     return "Unknown"
+
+
+def _audit_lines(scan: ScanResult) -> list[str]:
+    summary = scan.summary
+    return [
+        f"- Actionable active findings: {summary.get('actionable_findings', 0)}",
+        "- Ignored informational or unknown-severity findings: "
+        f"{summary.get('ignored_findings', 0)}",
+        f"- Passed checks: {summary.get('passed_checks', 0)}",
+        f"- Duplicate findings removed: {summary.get('duplicate_findings_removed', 0)}",
+        f"- Scanner errors: {summary.get('scanner_errors', 0)}",
+    ]
 
 
 def _severity_label(finding: Finding) -> str:
@@ -136,7 +165,7 @@ def _what_happened(
         return f"{scanner_summary} {finding_summary} Health is {scan.health_score}/100."
     return (
         f"{scanner_summary} {finding_summary} This is the first baseline, so current findings "
-        "are treated as new."
+        "establish the starting point for future comparisons."
     )
 
 
@@ -162,10 +191,13 @@ def _scanner_summary(scan: ScanResult) -> str:
 def _change_lines(comparison: ComparisonSummary) -> list[str]:
     if not comparison.has_baseline:
         return ["- First scan: no previous baseline existed."]
+    new_count = len(actionable_active_findings(comparison.new_findings))
+    recurring_count = len(actionable_active_findings(comparison.recurring_findings))
+    resolved_count = len(actionable_findings(comparison.resolved_findings))
     return [
-        f"- {_plural(len(comparison.new_findings), 'new finding')}",
-        f"- {_plural(len(comparison.recurring_findings), 'recurring finding')}",
-        f"- {_plural(len(comparison.resolved_findings), 'resolved finding')}",
+        f"- {_plural(new_count, 'new finding')}",
+        f"- {_plural(recurring_count, 'recurring finding')}",
+        f"- {_plural(resolved_count, 'resolved finding')}",
         f"- {_plural(len(comparison.severity_changes), 'severity change')}",
         f"- Health score {_health_trend(comparison)}",
     ]
@@ -174,10 +206,13 @@ def _change_lines(comparison: ComparisonSummary) -> list[str]:
 def _change_sentence(comparison: ComparisonSummary) -> str:
     if not comparison.has_baseline:
         return "first scan"
+    new_count = len(actionable_active_findings(comparison.new_findings))
+    recurring_count = len(actionable_active_findings(comparison.recurring_findings))
+    resolved_count = len(actionable_findings(comparison.resolved_findings))
     return (
-        f"{_plural(len(comparison.new_findings), 'new finding')}, "
-        f"{_plural(len(comparison.recurring_findings), 'recurring finding')}, "
-        f"{_plural(len(comparison.resolved_findings), 'resolved finding')}, "
+        f"{_plural(new_count, 'new finding')}, "
+        f"{_plural(recurring_count, 'recurring finding')}, "
+        f"{_plural(resolved_count, 'resolved finding')}, "
         f"health score {_health_trend(comparison)}"
     )
 

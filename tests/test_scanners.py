@@ -3,9 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from driftbeacon.models import ScannerStatus
+from driftbeacon.scanners import base as base_module
 from driftbeacon.scanners import checkov as checkov_module
 from driftbeacon.scanners import trivy as trivy_module
-from driftbeacon.scanners.base import safe_walk
+from driftbeacon.scanners.base import _scrub_repository_path, executable_path, safe_walk
 from driftbeacon.scanners.checkov import execution_from_json_output
 
 
@@ -30,6 +31,25 @@ def test_safe_walk_skips_driftbeacon_generated_directories(tmp_path: Path) -> No
     assert ".driftbeacon-demo/state.json" not in walked
 
 
+def test_scanner_status_messages_scrub_local_repository_path(tmp_path: Path) -> None:
+    message = f"failed to inspect {tmp_path}/terraform/main.tf password=super-secret"
+
+    scrubbed = _scrub_repository_path(message, tmp_path)
+
+    assert str(tmp_path) not in scrubbed
+    assert "./terraform/main.tf" in scrubbed
+
+
+def test_executable_path_resolves_relative_path(monkeypatch: object) -> None:
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        base_module.shutil,
+        "which",
+        lambda _name: ".venv/bin/checkov",
+    )
+
+    assert Path(executable_path("checkov") or "").is_absolute()
+
+
 def test_checkov_command_skips_generated_directories(
     tmp_path: Path, monkeypatch: object
 ) -> None:
@@ -48,11 +68,12 @@ def test_checkov_command_skips_generated_directories(
             0.1,
         )
 
-    monkeypatch.setattr(checkov_module, "executable_exists", lambda _name: True)  # type: ignore[attr-defined]
+    monkeypatch.setattr(checkov_module, "executable_path", lambda _name: "/usr/bin/checkov")  # type: ignore[attr-defined]
     monkeypatch.setattr(checkov_module, "run_subprocess", fake_run_subprocess)  # type: ignore[attr-defined]
 
     checkov_module.CheckovScanner().run(tmp_path)
 
+    assert captured["args"][0] == "/usr/bin/checkov"
     assert "--skip-download" in captured["args"]
     assert ".driftbeacon" in captured["args"]
 
@@ -73,10 +94,11 @@ def test_trivy_command_skips_generated_directories(tmp_path: Path, monkeypatch: 
             0.1,
         )
 
-    monkeypatch.setattr(trivy_module, "executable_exists", lambda _name: True)  # type: ignore[attr-defined]
+    monkeypatch.setattr(trivy_module, "executable_path", lambda _name: "/usr/bin/trivy")  # type: ignore[attr-defined]
     monkeypatch.setattr(trivy_module, "run_subprocess", fake_run_subprocess)  # type: ignore[attr-defined]
 
     trivy_module.TrivyScanner().run(tmp_path)
 
+    assert captured["args"][0] == "/usr/bin/trivy"
     assert "--skip-check-update" in captured["args"]
     assert ".driftbeacon" in captured["args"]

@@ -4,12 +4,45 @@ from __future__ import annotations
 
 import hashlib
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .models import Finding, normalize_severity
 from .redaction import redact_secrets, truncate
+
+
+@dataclass(frozen=True, slots=True)
+class NormalisationDiagnostics:
+    """Counts that explain scanner JSON normalization."""
+
+    raw_results: int
+    passed_results: int
+    normalised_findings: int
+    deduplicated_findings: int
+    duplicate_findings_removed: int
+    informational_findings: int
+    unknown_severity_findings: int
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "raw_results": self.raw_results,
+            "passed_results": self.passed_results,
+            "normalised_findings": self.normalised_findings,
+            "deduplicated_findings": self.deduplicated_findings,
+            "duplicate_findings_removed": self.duplicate_findings_removed,
+            "informational_findings": self.informational_findings,
+            "unknown_severity_findings": self.unknown_severity_findings,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class NormalisationResult:
+    """Normalized findings plus audit diagnostics."""
+
+    findings: list[Finding]
+    diagnostics: NormalisationDiagnostics
 
 
 def stable_fingerprint(
@@ -34,6 +67,14 @@ def stable_fingerprint(
 
 def normalise_checkov(data: Any, repository_path: Path | None = None) -> list[Finding]:
     """Normalize Checkov JSON output."""
+
+    return normalise_checkov_with_diagnostics(data, repository_path).findings
+
+
+def normalise_checkov_with_diagnostics(
+    data: Any, repository_path: Path | None = None
+) -> NormalisationResult:
+    """Normalize Checkov JSON output and return audit diagnostics."""
 
     checks = _collect_checkov_failed_checks(data)
     findings: list[Finding] = []
@@ -88,17 +129,50 @@ def normalise_checkov(data: Any, repository_path: Path | None = None) -> list[Fi
                 documentation_url=documentation_url,
             )
         )
-    return _deduplicate_findings(findings)
+    unique = _deduplicate_findings(findings)
+    return NormalisationResult(
+        findings=unique,
+        diagnostics=_diagnostics(
+            raw_results=len(checks) + _collect_checkov_passed_count(data),
+            passed_results=_collect_checkov_passed_count(data),
+            findings=findings,
+            unique_findings=unique,
+        ),
+    )
 
 
 def normalise_trivy(data: Any, repository_path: Path | None = None) -> list[Finding]:
     """Normalize Trivy filesystem JSON output."""
 
+    return normalise_trivy_with_diagnostics(data, repository_path).findings
+
+
+def normalise_trivy_with_diagnostics(
+    data: Any, repository_path: Path | None = None
+) -> NormalisationResult:
+    """Normalize Trivy filesystem JSON output and return audit diagnostics."""
+
     if not isinstance(data, dict):
-        return []
+        return NormalisationResult(
+            findings=[],
+            diagnostics=_diagnostics(
+                raw_results=0,
+                passed_results=0,
+                findings=[],
+                unique_findings=[],
+            ),
+        )
     results = data.get("Results")
     if not isinstance(results, list):
-        return []
+        return NormalisationResult(
+            findings=[],
+            diagnostics=_diagnostics(
+                raw_results=0,
+                passed_results=0,
+                findings=[],
+                unique_findings=[],
+            ),
+        )
 
     findings: list[Finding] = []
     for result in results:
@@ -108,7 +182,16 @@ def normalise_trivy(data: Any, repository_path: Path | None = None) -> list[Find
         findings.extend(_trivy_vulnerabilities(result, target))
         findings.extend(_trivy_misconfigurations(result, target, repository_path))
         findings.extend(_trivy_secrets(result, target))
-    return _deduplicate_findings(findings)
+    unique = _deduplicate_findings(findings)
+    return NormalisationResult(
+        findings=unique,
+        diagnostics=_diagnostics(
+            raw_results=_count_trivy_raw_results(results),
+            passed_results=0,
+            findings=findings,
+            unique_findings=unique,
+        ),
+    )
 
 
 def apply_observed_time(findings: list[Finding], observed_at: datetime) -> list[Finding]:
@@ -154,6 +237,34 @@ def _collect_checkov_failed_checks(data: Any) -> list[dict[str, Any]]:
     if isinstance(failed_checks, list):
         return [item for item in failed_checks if isinstance(item, dict)]
     return []
+
+
+def _collect_checkov_passed_count(data: Any) -> int:
+    if isinstance(data, list):
+        return sum(_collect_checkov_passed_count(item) for item in data)
+    if not isinstance(data, dict):
+        return 0
+    results = data.get("results")
+    if isinstance(results, dict) and isinstance(results.get("passed_checks"), list):
+        return len(results["passed_checks"])
+    if isinstance(data.get("passed_checks"), list):
+        return len(data["passed_checks"])
+    summary = data.get("summary")
+    if isinstance(summary, dict) and isinstance(summary.get("passed"), int):
+        return int(summary["passed"])
+    return 0
+
+
+def _count_trivy_raw_results(results: list[Any]) -> int:
+    count = 0
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        for key in ("Vulnerabilities", "Misconfigurations", "Secrets"):
+            items = result.get(key)
+            if isinstance(items, list):
+                count += len(items)
+    return count
 
 
 def _trivy_vulnerabilities(result: dict[str, Any], target: str | None) -> list[Finding]:
@@ -301,6 +412,26 @@ def _deduplicate_findings(findings: list[Finding]) -> list[Finding]:
         seen.add(finding.fingerprint)
         unique.append(finding)
     return unique
+
+
+def _diagnostics(
+    *,
+    raw_results: int,
+    passed_results: int,
+    findings: list[Finding],
+    unique_findings: list[Finding],
+) -> NormalisationDiagnostics:
+    return NormalisationDiagnostics(
+        raw_results=raw_results,
+        passed_results=passed_results,
+        normalised_findings=len(findings),
+        deduplicated_findings=len(unique_findings),
+        duplicate_findings_removed=max(0, len(findings) - len(unique_findings)),
+        informational_findings=sum(1 for finding in unique_findings if finding.severity == "info"),
+        unknown_severity_findings=sum(
+            1 for finding in unique_findings if finding.severity == "unknown"
+        ),
+    )
 
 
 def _normalise_path(value: object, repository_path: Path | None = None) -> str | None:

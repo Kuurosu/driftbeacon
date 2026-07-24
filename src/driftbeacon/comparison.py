@@ -6,7 +6,7 @@ from copy import deepcopy
 from datetime import datetime
 
 from .models import ComparisonSummary, Finding, ScanResult, active_findings
-from .scoring import calculate_health_score
+from .scoring import actionable_active_findings, actionable_findings, calculate_health_score
 
 
 def compare_scans(current: ScanResult, previous: ScanResult | None) -> ComparisonSummary:
@@ -23,16 +23,19 @@ def compare_scans(current: ScanResult, previous: ScanResult | None) -> Compariso
 
     if previous is not None:
         comparison.health_score_change = current.health_score - previous.health_score
-        comparison.active_findings_change = len(active_findings(current.findings)) - len(
-            previous_findings
-        )
+        comparison.active_findings_change = len(
+            actionable_active_findings(current.findings)
+        ) - len(actionable_active_findings(previous_findings))
 
     current.summary = {
-        "active_findings": len(active_findings(current.findings)),
-        "new_findings": len(comparison.new_findings),
-        "recurring_findings": len(comparison.recurring_findings),
-        "resolved_findings": len(comparison.resolved_findings),
+        **current.summary,
+        "active_findings": len(actionable_active_findings(current.findings)),
+        "actionable_findings": len(actionable_active_findings(current.findings)),
+        "new_findings": len(actionable_active_findings(comparison.new_findings)),
+        "recurring_findings": len(actionable_active_findings(comparison.recurring_findings)),
+        "resolved_findings": len(actionable_findings(comparison.resolved_findings)),
         "severity_changes": len(comparison.severity_changes),
+        "baseline_status": "comparison_scan" if comparison.has_baseline else "initial_baseline",
     }
     return comparison
 

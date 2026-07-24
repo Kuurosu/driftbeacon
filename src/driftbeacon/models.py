@@ -255,9 +255,9 @@ class ComparisonSummary:
             "health_score_change": self.health_score_change,
             "active_findings_change": self.active_findings_change,
             "counts": {
-                "new": len(self.new_findings),
-                "recurring": len(self.recurring_findings),
-                "resolved": len(self.resolved_findings),
+                "new": actionable_count(self.new_findings),
+                "recurring": actionable_count(self.recurring_findings),
+                "resolved": actionable_count(self.resolved_findings),
                 "severity_changes": len(self.severity_changes),
             },
         }
@@ -267,3 +267,10 @@ def active_findings(findings: list[Finding]) -> list[Finding]:
     """Return findings that are still active."""
 
     return [finding for finding in findings if finding.status != "resolved"]
+
+
+def actionable_count(findings: list[Finding]) -> int:
+    """Count findings with severities that DriftBeacon treats as actionable."""
+
+    actionable_severities = {"critical", "high", "medium", "low"}
+    return sum(1 for finding in findings if finding.severity in actionable_severities)
