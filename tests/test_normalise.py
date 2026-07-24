@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from conftest import load_fixture
 
-from DriftBeacon.normalise import normalise_checkov, normalise_trivy, stable_fingerprint
+from driftbeacon.normalise import normalise_checkov, normalise_trivy, stable_fingerprint
 
 
 def test_checkov_normalisation_extracts_core_fields() -> None:

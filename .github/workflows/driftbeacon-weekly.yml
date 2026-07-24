@@ -23,10 +23,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Restore previous DriftBeacon scan
+      - name: Restore previous driftbeacon scan
         uses: actions/cache/restore@v4
         with:
-          path: .DriftBeacon-history
+          path: .driftbeacon-history
           key: ${{ runner.os }}-driftbeacon-${{ github.repository_id }}-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
             ${{ runner.os }}-driftbeacon-${{ github.repository_id }}-${{ github.ref_name }}-
@@ -44,34 +44,34 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
-          mkdir -p .DriftBeacon-history
-          DriftBeacon run \
+          mkdir -p .driftbeacon-history
+          driftbeacon run \
             --repository-path . \
-            --output-dir .DriftBeacon \
-            --previous-scan .DriftBeacon-history/previous-scan.json \
+            --output-dir .driftbeacon \
+            --previous-scan .driftbeacon-history/previous-scan.json \
             --slack-webhook-env SLACK_WEBHOOK_URL
 
       - name: Save current scan for next run
-        if: always() && hashFiles('.DriftBeacon/current-scan.json') != ''
+        if: always() && hashFiles('.driftbeacon/current-scan.json') != ''
         run: |
-          mkdir -p .DriftBeacon-history
-          cp .DriftBeacon/current-scan.json .DriftBeacon-history/previous-scan.json
+          mkdir -p .driftbeacon-history
+          cp .driftbeacon/current-scan.json .driftbeacon-history/previous-scan.json
 
       - name: Save DriftBeacon history cache
-        if: always() && hashFiles('.DriftBeacon-history/previous-scan.json') != ''
+        if: always() && hashFiles('.driftbeacon-history/previous-scan.json') != ''
         uses: actions/cache/save@v4
         with:
-          path: .DriftBeacon-history
+          path: .driftbeacon-history
           key: ${{ runner.os }}-driftbeacon-${{ github.repository_id }}-${{ github.ref_name }}-${{ github.run_id }}
 
       - name: Upload DriftBeacon artifacts
-        if: always() && hashFiles('.DriftBeacon/report.md') != ''
+        if: always() && hashFiles('.driftbeacon/report.md') != ''
         uses: actions/upload-artifact@v4
         with:
           name: driftbeacon-weekly
           if-no-files-found: error
           retention-days: 30
           path: |
-            .DriftBeacon/report.md
-            .DriftBeacon/current-scan.json
-            .DriftBeacon/comparison-summary.json
+            .driftbeacon/report.md
+            .driftbeacon/current-scan.json
+            .driftbeacon/comparison-summary.json

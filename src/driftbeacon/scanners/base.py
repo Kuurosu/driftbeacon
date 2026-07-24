@@ -11,13 +11,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from DriftBeacon.models import Finding, ScannerStatus
-from DriftBeacon.redaction import redact_secrets, truncate
+from driftbeacon.models import Finding, ScannerStatus
+from driftbeacon.redaction import redact_secrets, truncate
 
 IGNORED_DIRS = {
     ".git",
-    ".DriftBeacon",
     ".driftbeacon",
+    ".driftbeacon-history",
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",

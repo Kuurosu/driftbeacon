@@ -19,7 +19,7 @@ format:
 	$(PYTHON) -m ruff format .
 
 run-sample:
-	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m DriftBeacon run \
+	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m driftbeacon run \
 		--repository-path . \
 		--output-dir .driftbeacon-sample \
 		--previous-scan examples/previous-scan.json \
@@ -28,4 +28,4 @@ run-sample:
 		--no-slack
 
 clean:
-	rm -rf .DriftBeacon .driftbeacon-sample .pytest_cache .mypy_cache .ruff_cache *.egg-info build dist
+	rm -rf .driftbeacon .driftbeacon-sample .pytest_cache .mypy_cache .ruff_cache *.egg-info build dist

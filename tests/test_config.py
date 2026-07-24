@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from DriftBeacon.config import ConfigError, load_config, parse_simple_yaml
+from driftbeacon.config import ConfigError, load_config, parse_simple_yaml
 
 
 def test_config_parses_expected_yaml_shape(tmp_path: object) -> None:
     repo = tmp_path  # type: ignore[assignment]
-    config_file = repo / ".DriftBeacon.yml"
+    config_file = repo / ".driftbeacon.yml"
     config_file.write_text(
         """
 output_dir: .custom
@@ -42,7 +42,7 @@ slack:
 
 
 def test_invalid_config_fails_clearly(tmp_path: object) -> None:
-    config_file = tmp_path / ".DriftBeacon.yml"  # type: ignore[operator]
+    config_file = tmp_path / ".driftbeacon.yml"  # type: ignore[operator]
     config_file.write_text("report:\n  top_findings: 0\n", encoding="utf-8")
 
     with pytest.raises(ConfigError, match="top_findings"):

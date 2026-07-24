@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from DriftBeacon.redaction import redact_secrets
-from DriftBeacon.slack import build_slack_payload, markdown_to_slack_summary, send_slack_report
+from driftbeacon.redaction import redact_secrets
+from driftbeacon.slack import build_slack_payload, markdown_to_slack_summary, send_slack_report
 
 
 def test_slack_payload_redacts_and_escapes_untrusted_text() -> None:

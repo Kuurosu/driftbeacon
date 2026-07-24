@@ -1,5 +1,5 @@
 repository_path: .
-output_dir: .DriftBeacon
+output_dir: .driftbeacon
 scanners:
   checkov:
     enabled: true

@@ -1,12 +1,12 @@
-"""Trivy scanner adapter."""
+"""Checkov scanner adapter."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
-from DriftBeacon.models import ScannerStatus
-from DriftBeacon.normalise import normalise_trivy
+from driftbeacon.models import ScannerStatus
+from driftbeacon.normalise import normalise_checkov
 
 from .base import (
     ScannerExecution,
@@ -17,63 +17,36 @@ from .base import (
     safe_walk,
 )
 
-DEPENDENCY_FILES = {
-    "cargo.lock",
-    "composer.lock",
-    "go.mod",
-    "go.sum",
-    "package-lock.json",
-    "package.json",
-    "pipfile.lock",
-    "poetry.lock",
-    "pom.xml",
-    "requirements.txt",
-    "yarn.lock",
-}
 
+class CheckovScanner:
+    """Run and normalize Checkov results."""
 
-class TrivyScanner:
-    """Run and normalize Trivy filesystem scans."""
-
-    name = "trivy"
-
-    def __init__(self, *, secret_scanning: bool = False) -> None:
-        self.secret_scanning = secret_scanning
+    name = "checkov"
 
     def run(self, repository_path: Path, *, timeout_seconds: int = 300) -> ScannerExecution:
         if not has_relevant_files(repository_path):
             return ScannerExecution(
                 scanner=self.name,
                 status=ScannerStatus(
-                    self.name, "skipped", "no dependency, IaC, Kubernetes, or Docker files found"
+                    self.name,
+                    "skipped",
+                    "no Terraform, CloudFormation, Kubernetes, or Docker files found",
                 ),
                 findings=[],
             )
-        if not executable_exists("trivy"):
+        if not executable_exists("checkov"):
             return ScannerExecution(
                 scanner=self.name,
-                status=ScannerStatus(self.name, "skipped", "trivy executable not found on PATH"),
+                status=ScannerStatus(self.name, "skipped", "checkov executable not found on PATH"),
                 findings=[],
             )
 
-        scanners = "vuln,misconfig"
-        if self.secret_scanning:
-            scanners += ",secret"
         stdout, stderr, _returncode, status, _duration = run_subprocess(
-            [
-                "trivy",
-                "fs",
-                "--format",
-                "json",
-                "--scanners",
-                scanners,
-                "--quiet",
-                str(repository_path),
-            ],
+            ["checkov", "-d", str(repository_path), "-o", "json", "--quiet"],
             cwd=repository_path,
             scanner=self.name,
             timeout_seconds=timeout_seconds,
-            acceptable_exit_codes={0},
+            acceptable_exit_codes={0, 1},
         )
         if not stdout.strip():
             return ScannerExecution(self.name, status, [], stdout=stdout, stderr=stderr)
@@ -93,38 +66,57 @@ def execution_from_json_output(
     stderr: str = "",
     base_status: ScannerStatus | None = None,
 ) -> ScannerExecution:
-    data, parse_status = parse_json_output("trivy", stdout)
+    data, parse_status = parse_json_output("checkov", stdout)
     if data is None:
-        return ScannerExecution("trivy", parse_status, [], stdout=stdout, stderr=stderr)
-    findings = normalise_trivy(data, repository_path)
+        return ScannerExecution("checkov", parse_status, [], stdout=stdout, stderr=stderr)
+    findings = normalise_checkov(data, repository_path)
     status = base_status or parse_status
     if base_status is not None and base_status.status != "success":
         status = ScannerStatus(
-            "trivy", base_status.status, base_status.message, base_status.duration_seconds
+            "checkov", base_status.status, base_status.message, base_status.duration_seconds
         )
-    return ScannerExecution("trivy", status, findings, raw_json=data, stdout=stdout, stderr=stderr)
+    return ScannerExecution(
+        "checkov", status, findings, raw_json=data, stdout=stdout, stderr=stderr
+    )
 
 
 def execution_from_data(data: Any, repository_path: Path) -> ScannerExecution:
-    findings = normalise_trivy(data, repository_path)
+    findings = normalise_checkov(data, repository_path)
     return ScannerExecution(
-        scanner="trivy",
-        status=ScannerStatus("trivy", "success", f"loaded {len(findings)} findings from JSON"),
+        scanner="checkov",
+        status=ScannerStatus("checkov", "success", f"loaded {len(findings)} findings from JSON"),
         findings=findings,
         raw_json=data,
     )
 
 
 def has_relevant_files(repository_path: Path) -> bool:
-    """Detect files Trivy can usefully inspect."""
+    """Detect files Checkov can usefully inspect."""
 
     for path in safe_walk(repository_path):
         name = path.name.lower()
         suffix = path.suffix.lower()
-        if name in DEPENDENCY_FILES:
+        if name in {"dockerfile", "dockerfile.prod"} or name.startswith("dockerfile."):
             return True
-        if name == "dockerfile" or name.startswith("dockerfile."):
+        if suffix in {".tf", ".tfvars"} or path.name.endswith(".tf.json"):
             return True
-        if suffix in {".tf", ".tfvars", ".yaml", ".yml", ".json"}:
+        if suffix in {".yaml", ".yml", ".json"} and _looks_like_iac(path):
             return True
     return False
+
+
+def _looks_like_iac(path: Path) -> bool:
+    try:
+        sample = path.read_text(encoding="utf-8", errors="ignore")[:8192].lower()
+    except OSError:
+        return False
+    return any(
+        marker in sample
+        for marker in (
+            "apiversion:",
+            "kind:",
+            "resources:",
+            "awstemplateformatversion",
+            "type: aws::",
+        )
+    )

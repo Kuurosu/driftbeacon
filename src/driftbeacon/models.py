@@ -176,7 +176,7 @@ class ScannerStatus:
 
 @dataclass(slots=True)
 class ScanResult:
-    """A complete DriftBeacon scan result."""
+    """A complete driftbeacon scan result."""
 
     repository: str
     branch: str

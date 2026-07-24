@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from DriftBeacon.scanners.checkov import execution_from_json_output
+from driftbeacon.scanners.checkov import execution_from_json_output
 
 
 def test_scanner_failure_for_malformed_json(tmp_path: object) -> None:

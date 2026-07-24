@@ -19,7 +19,7 @@ on:
       - "**/yarn.lock"
       - "**/go.mod"
       - "**/go.sum"
-      - ".DriftBeacon.yml"
+      - ".driftbeacon.yml"
       - "src/**"
       - "tests/**"
 
@@ -52,23 +52,23 @@ jobs:
 
       - name: Run DriftBeacon without Slack
         run: |
-          DriftBeacon run \
+          driftbeacon run \
             --repository-path . \
-            --output-dir .DriftBeacon \
+            --output-dir .driftbeacon \
             --no-slack
 
-      - name: Add DriftBeacon report to job summary
-        if: always() && hashFiles('.DriftBeacon/report.md') != ''
-        run: cat .DriftBeacon/report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Add driftbeacon report to job summary
+        if: always() && hashFiles('.driftbeacon/report.md') != ''
+        run: cat .driftbeacon/report.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload DriftBeacon artifacts
-        if: always() && hashFiles('.DriftBeacon/report.md') != ''
+        if: always() && hashFiles('.driftbeacon/report.md') != ''
         uses: actions/upload-artifact@v4
         with:
           name: driftbeacon-pr
           if-no-files-found: error
           retention-days: 14
           path: |
-            .DriftBeacon/report.md
-            .DriftBeacon/current-scan.json
-            .DriftBeacon/comparison-summary.json
+            .driftbeacon/report.md
+            .driftbeacon/current-scan.json
+            .driftbeacon/comparison-summary.json

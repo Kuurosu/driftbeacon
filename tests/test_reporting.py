@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from DriftBeacon.comparison import compare_scans
-from DriftBeacon.models import ScannerStatus, ScanResult
-from DriftBeacon.reporting import generate_report
+from driftbeacon.comparison import compare_scans
+from driftbeacon.models import ScannerStatus, ScanResult
+from driftbeacon.reporting import generate_report
 
 
 def test_report_generation_includes_summary_and_scanner_failure(

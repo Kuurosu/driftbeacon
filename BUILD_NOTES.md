@@ -3,7 +3,7 @@
 ## Architectural Decisions
 
 - Built DriftBeacon as a Python 3.12 package with an argparse CLI and no runtime dependencies.
-- Kept scanner execution in adapters under `src/DriftBeacon/scanners/`.
+- Kept scanner execution in adapters under `src/driftbeacon/scanners/`.
 - Used Checkov and Trivy as external scanners; unit tests use fixture JSON and do not require those tools.
 - Normalized all scanner findings into one typed `Finding` dataclass with stable fingerprints.
 - Fingerprints use scanner, rule ID, file path, resource, and line number. They do not use timestamps.
@@ -12,10 +12,10 @@
 - Used GitHub Actions cache as the free MVP history store, with artifacts for reports and scan state.
 - Made Slack optional and environment-driven so webhook values are never stored in config files.
 - Added a small YAML-subset parser to avoid adding PyYAML as a runtime dependency.
-- Exposed a single `DriftBeacon` console script to avoid case-only script collisions on macOS filesystems.
+- Exposed a single `driftbeacon` console script to avoid case-only script collisions on macOS filesystems.
 - Hardened `scripts/install-local.sh` so it moves a broken `.venv` aside and recreates it when pip cannot cleanly uninstall an old editable install.
 - Converted Markdown reports into Slack-native `mrkdwn` summaries so Slack messages keep readable line breaks.
-- Made `make run-sample` and the local `DriftBeacon` launcher run directly from `src/` so local commands do not depend on editable-install `.pth` behavior.
+- Made `make run-sample` and the local `driftbeacon` launcher run directly from `src/` so local commands do not depend on editable-install `.pth` behavior.
 
 ## Commands Executed
 
@@ -25,13 +25,13 @@ python3.12 -m venv .venv
 .venv/bin/python -m pytest
 .venv/bin/python -m ruff check .
 .venv/bin/python -m mypy src
-.venv/bin/DriftBeacon --help
-.venv/bin/DriftBeacon run --help
+.venv/bin/driftbeacon --help
+.venv/bin/driftbeacon run --help
 make test
 make lint
 make typecheck
 make run-sample
-.venv/bin/python -m DriftBeacon scan --repository-path /private/tmp/driftbeacon-mvp --output-dir /private/tmp/driftbeacon-mvp/.DriftBeacon-missing-scanners
+.venv/bin/python -m driftbeacon scan --repository-path /private/tmp/driftbeacon-mvp --output-dir /private/tmp/driftbeacon-mvp/.driftbeacon-missing-scanners
 ```
 
 ## Tests Run
@@ -50,7 +50,7 @@ make run-sample
 
 - GitHub Actions cache is not durable storage and may be evicted.
 - Secret redaction is best effort.
-- The bundled config parser supports the documented `.DriftBeacon.yml` shape, not arbitrary YAML.
+- The bundled config parser supports the documented `.driftbeacon.yml` shape, not arbitrary YAML.
 - Scanner integration tests are not included because the MVP unit suite must not require local Checkov or Trivy installs.
 - The workflows install Checkov and Trivy at run time, so first runs depend on public package availability.
 - Local scans without Git metadata show repository name from the folder and `unknown` branch/commit.

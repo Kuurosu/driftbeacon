@@ -6,9 +6,9 @@ from typing import Any
 
 import pytest
 
-from DriftBeacon.models import ScannerStatus, ScanResult
-from DriftBeacon.normalise import normalise_checkov, normalise_trivy
-from DriftBeacon.scoring import calculate_health_score
+from driftbeacon.models import ScannerStatus, ScanResult
+from driftbeacon.normalise import normalise_checkov, normalise_trivy
+from driftbeacon.scoring import calculate_health_score
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

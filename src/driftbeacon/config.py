@@ -22,7 +22,7 @@ class Config:
     """Runtime configuration for DriftBeacon."""
 
     repository_path: Path = Path(".")
-    output_dir: Path = Path(".DriftBeacon")
+    output_dir: Path = Path(".driftbeacon")
     checkov_enabled: bool = True
     trivy_enabled: bool = True
     trivy_secret_scanning: bool = False
@@ -93,7 +93,7 @@ def load_config(
 
 
 def parse_simple_yaml(text: str) -> dict[str, Any]:
-    """Parse the limited YAML subset used by `.DriftBeacon.yml`.
+    """Parse the limited YAML subset used by `.driftbeacon.yml`.
 
     PyYAML is intentionally not required. This parser supports nested mappings,
     booleans, integers, nulls, quoted/unquoted strings, and simple lists.
@@ -154,8 +154,11 @@ def _discover_config_path(repository_path: Path, config_path: str | Path | None)
         if not path.exists():
             raise ConfigError(f"config file does not exist: {path}")
         return path
-    default_path = repository_path / ".DriftBeacon.yml"
-    return default_path if default_path.exists() else None
+    default_path = repository_path / ".driftbeacon.yml"
+    if default_path.exists():
+        return default_path
+    legacy_path = repository_path / ".DriftBeacon.yml"
+    return legacy_path if legacy_path.exists() else None
 
 
 def _apply_mapping(config: Config, data: dict[str, Any]) -> None:

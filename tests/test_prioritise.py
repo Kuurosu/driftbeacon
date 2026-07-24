@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from DriftBeacon.comparison import compare_scans
-from DriftBeacon.models import ScanResult
-from DriftBeacon.prioritise import is_production_like, prioritise_findings, priority_score
+from driftbeacon.comparison import compare_scans
+from driftbeacon.models import ScanResult
+from driftbeacon.prioritise import is_production_like, prioritise_findings, priority_score
 
 
 def test_priority_order_considers_more_than_severity(

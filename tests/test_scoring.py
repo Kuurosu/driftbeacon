@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from DriftBeacon.models import Finding
-from DriftBeacon.scoring import calculate_health_score
+from driftbeacon.models import Finding
+from driftbeacon.scoring import calculate_health_score
 
 
 def test_health_score_subtracts_weighted_active_findings(current_scan: object) -> None:

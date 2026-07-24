@@ -56,18 +56,18 @@ fi
 
 python -m pip install -e ".[dev]"
 
-cat > .venv/bin/DriftBeacon <<'EOF'
+cat > .venv/bin/driftbeacon <<'EOF'
 #!/usr/bin/env sh
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
-PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}" exec "$SCRIPT_DIR/python" -m DriftBeacon "$@"
+PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}" exec "$SCRIPT_DIR/python" -m driftbeacon "$@"
 EOF
-chmod +x .venv/bin/DriftBeacon
+chmod +x .venv/bin/driftbeacon
 
-if [ ! -x .venv/bin/DriftBeacon ]; then
-  printf '%s\n' "Install completed but .venv/bin/DriftBeacon was not created." >&2
+if [ ! -x .venv/bin/driftbeacon ]; then
+  printf '%s\n' "Install completed but .venv/bin/driftbeacon was not created." >&2
   printf '%s\n' "Try removing the local virtualenv and reinstalling: rm -rf .venv && ./scripts/install-local.sh" >&2
   exit 1
 fi
 
-printf '%s\n' "DriftBeacon installed. Run: . .venv/bin/activate && DriftBeacon --help"
+printf '%s\n' "driftbeacon installed. Run: . .venv/bin/activate && driftbeacon --help"

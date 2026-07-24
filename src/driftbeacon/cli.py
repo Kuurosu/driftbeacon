@@ -40,10 +40,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="DriftBeacon",
+        prog="driftbeacon",
         description="Scan infrastructure repositories and generate concise operational reports.",
     )
-    parser.add_argument("--version", action="version", version="DriftBeacon 0.1.0")
+    parser.add_argument("--version", action="version", version="driftbeacon 0.1.0")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     scan_parser = subparsers.add_parser("scan", help="Run scanners and save normalized output.")
@@ -320,7 +320,7 @@ def _add_config_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--output-dir", type=Path, default=None, help="Directory for generated output."
     )
-    parser.add_argument("--config", type=Path, default=None, help="Optional .DriftBeacon.yml path.")
+    parser.add_argument("--config", type=Path, default=None, help="Optional .driftbeacon.yml path.")
     parser.add_argument(
         "--no-slack", action="store_true", help="Skip Slack delivery even if configured."
     )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from DriftBeacon.comparison import compare_scans
-from DriftBeacon.models import ScanResult
+from driftbeacon.comparison import compare_scans
+from driftbeacon.models import ScanResult
 
 
 def test_first_run_marks_all_current_findings_new(current_scan: ScanResult) -> None:

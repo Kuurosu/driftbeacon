@@ -39,7 +39,7 @@ Scoring and prioritisation
 Markdown report, JSON state, optional Slack webhook
 ```
 
-The local storage backend writes generated files to `.DriftBeacon/`. The storage interface is small enough to replace later with S3, PostgreSQL, or another history store.
+The local storage backend writes generated files to `.driftbeacon/`. The storage interface is small enough to replace later with S3, PostgreSQL, or another history store.
 
 ## Five-Minute Local Setup
 
@@ -56,7 +56,7 @@ git clone https://github.com/Kuurosu/driftbeacon.git
 cd driftbeacon
 ./scripts/install-local.sh
 . .venv/bin/activate
-DriftBeacon --help
+driftbeacon --help
 ```
 
 Run the sample report without installing scanners:
@@ -69,10 +69,10 @@ open .driftbeacon-sample/report.md
 Run against the current repository:
 
 ```sh
-DriftBeacon run \
+driftbeacon run \
   --repository-path . \
-  --output-dir .DriftBeacon \
-  --previous-scan .DriftBeacon/previous-scan.json
+  --output-dir .driftbeacon \
+  --previous-scan .driftbeacon/previous-scan.json
 ```
 
 ## Scanner Setup
@@ -91,27 +91,27 @@ Missing scanners do not crash DriftBeacon. They are recorded as `skipped` in the
 ## CLI Reference
 
 ```sh
-DriftBeacon scan
-DriftBeacon report
-DriftBeacon compare
-DriftBeacon send-slack
-DriftBeacon run
+driftbeacon scan
+driftbeacon report
+driftbeacon compare
+driftbeacon send-slack
+driftbeacon run
 ```
 
 Full workflow:
 
 ```sh
-DriftBeacon run \
+driftbeacon run \
   --repository-path . \
-  --output-dir .DriftBeacon \
-  --previous-scan .DriftBeacon/previous-scan.json \
+  --output-dir .driftbeacon \
+  --previous-scan .driftbeacon/previous-scan.json \
   --slack-webhook-env SLACK_WEBHOOK_URL
 ```
 
 Use fixture JSON instead of running scanners:
 
 ```sh
-DriftBeacon run \
+driftbeacon run \
   --repository-path . \
   --output-dir .driftbeacon-sample \
   --previous-scan examples/previous-scan.json \
@@ -125,8 +125,8 @@ DriftBeacon run \
 Copy the included workflows into your repository:
 
 ```text
-.github/workflows/DriftBeacon-weekly.yml
-.github/workflows/DriftBeacon-pr.yml
+.github/workflows/driftbeacon-weekly.yml
+.github/workflows/driftbeacon-pr.yml
 ```
 
 The weekly workflow:
@@ -161,20 +161,20 @@ For local testing:
 ```sh
 cp .env.example .env
 export SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
-DriftBeacon send-slack --report-file .driftbeacon-sample/report.md
+driftbeacon send-slack --report-file .driftbeacon-sample/report.md
 ```
 
 Never commit `.env` or a real webhook URL. DriftBeacon redacts common webhook and token patterns before reporting errors.
 
 ## Configuration
 
-Configuration can come from command-line flags, environment variables, or an optional `.DriftBeacon.yml`.
+Configuration can come from command-line flags, environment variables, or an optional `.driftbeacon.yml`.
 
 Example:
 
 ```yaml
 repository_path: .
-output_dir: .DriftBeacon
+output_dir: .driftbeacon
 scanners:
   checkov:
     enabled: true
@@ -277,7 +277,7 @@ Slack did not send:
 
 ```sh
 echo "$SLACK_WEBHOOK_URL"
-DriftBeacon send-slack --report-file .DriftBeacon/report.md
+driftbeacon send-slack --report-file .driftbeacon/report.md
 ```
 
 Do not print the actual webhook value in shared logs.
@@ -287,7 +287,7 @@ Invalid config:
 Run:
 
 ```sh
-DriftBeacon run --config .DriftBeacon.yml --no-slack
+driftbeacon run --config .driftbeacon.yml --no-slack
 ```
 
 The parser supports the documented YAML shape and fails clearly for invalid booleans, paths, thresholds, and report counts.
@@ -299,10 +299,10 @@ The parser supports the documented YAML shape and fails clearly for invalid bool
 - Scanner subprocesses use argument arrays, not shell strings.
 - Scanner execution uses timeouts.
 - Repository walking does not follow symlinks and skips generated directories.
-- DriftBeacon refuses symlinked scan/config output paths where practical.
+- driftbeacon refuses symlinked scan/config output paths where practical.
 - GitHub workflows use read-only repository permissions.
 - PR workflows do not expose Slack secrets.
-- Artifacts include only generated DriftBeacon reports and JSON state, not the whole repository.
+- Artifacts include only generated driftbeacon reports and JSON state, not the whole repository.
 
 Limitations:
 

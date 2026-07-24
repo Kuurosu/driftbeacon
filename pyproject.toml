@@ -29,7 +29,7 @@ dev = [
 ]
 
 [project.scripts]
-DriftBeacon = "DriftBeacon.cli:main"
+driftbeacon = "driftbeacon.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
