@@ -4,11 +4,13 @@ Status date: 2026-07-24
 
 ## Validation
 
-- [x] `python -m pytest` passed: 24 tests.
+- [x] `python -m pytest` passed: 31 tests.
 - [x] `ruff check .` passed.
-- [x] `mypy src` passed: 17 source files.
+- [x] `mypy src` passed: 19 source files.
 - [x] `make run-sample` passed and generated `.driftbeacon-sample/report.md`.
 - [x] `driftbeacon --help` passed from the installed local CLI.
+- [x] `driftbeacon analyse-repo` validated against a local Git repository clone.
+- [x] `driftbeacon analyse` validated with one successful local Git repository and one failed repository.
 - [x] Checkov validated against `examples/demo-infrastructure/`: 52 failed checks captured.
 - [x] Trivy validated against `examples/demo-infrastructure/`: 41 misconfigurations captured.
 - [x] Historical comparison validated with new, recurring, resolved, and health score delta states.
@@ -33,6 +35,7 @@ Status date: 2026-07-24
 - Checkov and Trivy coverage, false positives, and network availability are inherited external dependencies.
 - Local scanner integration tests are not part of the default unit suite.
 - DriftBeacon does not yet emit SARIF, PR annotations, or hosted dashboards.
+- Repository Analysis Mode clones public repositories locally and does not yet integrate with hosted repository inventory APIs.
 - Secret redaction is best effort.
 
 ## Roadmap

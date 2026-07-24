@@ -47,6 +47,7 @@ The local storage backend writes generated files to `.driftbeacon/`. The storage
 Requirements:
 
 - Python 3.12
+- Git
 - macOS with zsh or Linux shell
 - Optional: Checkov and Trivy for real repository scanning
 
@@ -97,6 +98,8 @@ driftbeacon report
 driftbeacon compare
 driftbeacon send-slack
 driftbeacon run
+driftbeacon analyse-repo
+driftbeacon analyse
 ```
 
 Full workflow:
@@ -120,6 +123,48 @@ driftbeacon run \
   --trivy-json examples/sample-trivy.json \
   --no-slack
 ```
+
+Analyse public Git repositories without manually cloning them:
+
+```sh
+driftbeacon analyse-repo https://github.com/example/infrastructure.git
+```
+
+Analyse many repositories in parallel:
+
+```sh
+cat > repos.txt <<'EOF'
+https://github.com/example/terraform-platform.git
+https://github.com/example/kubernetes-services.git
+EOF
+
+driftbeacon analyse repos.txt --workers 4
+```
+
+Repository analysis mode:
+
+- Clones each repository into a temporary directory.
+- Detects supported infrastructure, Docker, Kubernetes, CloudFormation, Terraform, and dependency files.
+- Runs the same Checkov and Trivy scanner adapters used by `driftbeacon run`.
+- Writes per-repository `current-scan.json`, `comparison-summary.json`, and `report.md`.
+- Prints progress such as `[12/50] Scanning terraform-aws-vpc...`.
+- Prints a one-line result per repository with health score and severity counts.
+- Continues when one repository fails.
+- Deletes temporary clones unless `--keep` is passed.
+
+By default, analysis output is written to `.driftbeacon-analysis/`:
+
+```text
+.driftbeacon-analysis/
+  analysis-summary.csv
+  analysis-summary.md
+  repository-a/
+    current-scan.json
+    comparison-summary.json
+    report.md
+```
+
+The Markdown summary is ranked by lowest health score first. The CSV contains one row per repository, including failed repositories and their error message.
 
 ## GitHub Installation
 

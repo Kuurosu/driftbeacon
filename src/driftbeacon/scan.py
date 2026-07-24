@@ -1,0 +1,134 @@
+"""Repository scan orchestration shared by CLI commands."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+from datetime import UTC, datetime
+from pathlib import Path
+
+from .comparison import compare_scans
+from .config import Config
+from .models import ScannerStatus, ScanResult, active_findings
+from .scanners import CheckovScanner, ScannerExecution, TrivyScanner
+from .scoring import calculate_health_score
+
+
+def run_scan(
+    config: Config,
+    *,
+    timeout_seconds: int = 300,
+    checkov_json: Path | None = None,
+    trivy_json: Path | None = None,
+    compare_with_previous: bool = False,
+) -> tuple[ScanResult, list[ScannerExecution]]:
+    """Run or load scanner outputs and return a scan result."""
+
+    started_at = datetime.now(UTC)
+    executions: list[ScannerExecution] = []
+
+    if config.checkov_enabled:
+        checkov = CheckovScanner()
+        if checkov_json is not None:
+            executions.append(checkov.from_file(checkov_json, config.repository_path))
+        else:
+            executions.append(checkov.run(config.repository_path, timeout_seconds=timeout_seconds))
+    else:
+        executions.append(
+            ScannerExecution(
+                "checkov",
+                ScannerStatus("checkov", "skipped", "disabled by configuration"),
+                [],
+            )
+        )
+
+    if config.trivy_enabled:
+        trivy = TrivyScanner(secret_scanning=config.trivy_secret_scanning)
+        if trivy_json is not None:
+            executions.append(trivy.from_file(trivy_json, config.repository_path))
+        else:
+            executions.append(trivy.run(config.repository_path, timeout_seconds=timeout_seconds))
+    else:
+        executions.append(
+            ScannerExecution(
+                "trivy",
+                ScannerStatus("trivy", "skipped", "disabled by configuration"),
+                [],
+            )
+        )
+
+    completed_at = datetime.now(UTC)
+    findings = [finding for execution in executions for finding in execution.findings]
+    for finding in findings:
+        finding.first_seen = finding.first_seen or started_at
+        finding.last_seen = completed_at
+    repository, branch, commit_sha = detect_repository_metadata(config.repository_path)
+    scanner_statuses = {execution.scanner: execution.status for execution in executions}
+    scan = ScanResult(
+        repository=repository,
+        branch=branch,
+        commit_sha=commit_sha,
+        started_at=started_at,
+        completed_at=completed_at,
+        scanner_statuses=scanner_statuses,
+        findings=findings,
+        health_score=calculate_health_score(findings),
+        summary={
+            "active_findings": len(active_findings(findings)),
+            "new_findings": len(findings),
+            "recurring_findings": 0,
+            "resolved_findings": 0,
+            "severity_changes": 0,
+        },
+    )
+    if compare_with_previous:
+        compare_scans(scan, None)
+    return scan, executions
+
+
+def detect_repository_metadata(repository_path: Path) -> tuple[str, str, str]:
+    """Detect repository name, branch, and commit SHA from GitHub Actions or Git."""
+
+    repository = os.environ.get("GITHUB_REPOSITORY") or _git_remote_repository(repository_path)
+    branch = os.environ.get("GITHUB_REF_NAME") or _git_output(
+        repository_path, ["git", "rev-parse", "--abbrev-ref", "HEAD"]
+    )
+    commit_sha = os.environ.get("GITHUB_SHA") or _git_output(
+        repository_path, ["git", "rev-parse", "HEAD"]
+    )
+    return (
+        repository or repository_path.name,
+        branch or "unknown",
+        commit_sha or "unknown",
+    )
+
+
+def _git_remote_repository(repository_path: Path) -> str | None:
+    remote = _git_output(repository_path, ["git", "config", "--get", "remote.origin.url"])
+    if not remote:
+        return None
+    if remote.endswith(".git"):
+        remote = remote[:-4]
+    if remote.startswith("git@github.com:"):
+        return remote.removeprefix("git@github.com:")
+    if "github.com/" in remote:
+        return remote.split("github.com/", 1)[1]
+    return remote
+
+
+def _git_output(repository_path: Path, args: list[str]) -> str | None:
+    try:
+        completed = subprocess.run(
+            args,
+            cwd=repository_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    output = completed.stdout.strip()
+    return output or None

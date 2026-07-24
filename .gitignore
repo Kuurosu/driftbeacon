@@ -1,8 +1,10 @@
 .driftbeacon/
+.driftbeacon-analysis/
 .driftbeacon-demo/
 .driftbeacon-sample/
 .driftbeacon-history/
 **/.driftbeacon/
+**/.driftbeacon-analysis/
 **/.driftbeacon-demo/
 **/.driftbeacon-sample/
 **/.driftbeacon-history/

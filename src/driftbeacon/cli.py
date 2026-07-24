@@ -5,20 +5,19 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 from collections.abc import Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .analysis import AnalysisOptions, analyse_repositories, read_repository_list
 from .comparison import compare_scans
 from .config import Config, ConfigError, load_config
-from .models import SEVERITY_RANK, ScannerStatus, ScanResult, active_findings
+from .models import SEVERITY_RANK, ScanResult
 from .prioritise import prioritise_findings
 from .reporting import generate_job_summary, generate_report
-from .scanners import CheckovScanner, ScannerExecution, TrivyScanner
-from .scoring import calculate_health_score
+from .scan import run_scan
+from .scanners import ScannerExecution
 from .slack import send_slack_report
 from .storage import LocalStorage, StorageError
 
@@ -48,6 +47,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Examples:\n"
             "  driftbeacon run --repository-path . --output-dir .driftbeacon --no-slack\n"
+            "  driftbeacon analyse-repo https://github.com/org/infrastructure.git\n"
+            "  driftbeacon analyse repos.txt --workers 4\n"
             "  driftbeacon run --checkov-json examples/sample-checkov.json "
             "--trivy-json examples/sample-trivy.json --no-slack\n"
             "  driftbeacon send-slack --report-file .driftbeacon/report.md"
@@ -57,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version="driftbeacon 0.1.0")
     subparsers = parser.add_subparsers(
         dest="command",
-        metavar="{scan,report,compare,send-slack,run}",
+        metavar="{scan,report,compare,send-slack,run,analyse-repo,analyse}",
         required=True,
     )
 
@@ -99,6 +100,22 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--timeout", type=int, default=300, help="Scanner timeout in seconds.")
     run_parser.add_argument("--github-summary-file", type=Path, default=_github_summary_path())
 
+    analyse_repo_parser = subparsers.add_parser(
+        "analyse-repo",
+        help="Clone and analyse one public Git repository.",
+    )
+    analyse_repo_parser.add_argument("git_url", help="Public Git repository URL to clone.")
+    _add_analysis_args(analyse_repo_parser, default_workers=1)
+
+    analyse_parser = subparsers.add_parser(
+        "analyse",
+        help="Clone and analyse repository URLs listed in a text file.",
+    )
+    analyse_parser.add_argument(
+        "repository_file", type=Path, help="File with one Git URL per line."
+    )
+    _add_analysis_args(analyse_parser, default_workers=4)
+
     return parser
 
 
@@ -118,6 +135,10 @@ def _dispatch(args: argparse.Namespace) -> int:
         return command_send_slack(args)
     if command == "run":
         return command_run(args)
+    if command == "analyse-repo":
+        return command_analyse_repo(args)
+    if command == "analyse":
+        return command_analyse(args)
     raise ValueError(f"unknown command: {command}")
 
 
@@ -206,6 +227,32 @@ def command_send_slack(args: argparse.Namespace) -> int:
     return 0 if result.sent or result.message.startswith("Slack skipped") else 1
 
 
+def command_analyse_repo(args: argparse.Namespace) -> int:
+    return _run_repository_analysis([str(args.git_url)], args)
+
+
+def command_analyse(args: argparse.Namespace) -> int:
+    return _run_repository_analysis(read_repository_list(Path(args.repository_file)), args)
+
+
+def _run_repository_analysis(git_urls: Sequence[str], args: argparse.Namespace) -> int:
+    result = analyse_repositories(
+        git_urls,
+        AnalysisOptions(
+            output_dir=Path(args.output_dir),
+            workers=int(args.workers),
+            keep=bool(args.keep),
+            scanner_timeout_seconds=int(args.timeout),
+            clone_timeout_seconds=int(args.clone_timeout),
+        ),
+    )
+    print(f"Saved analysis summary CSV to {result.csv_path}")
+    print(f"Saved analysis summary Markdown to {result.markdown_path}")
+    for line in result.final_summary_lines():
+        print(line)
+    return 0
+
+
 def execute_scan(
     config: Config,
     args: argparse.Namespace,
@@ -214,116 +261,13 @@ def execute_scan(
 ) -> tuple[ScanResult, list[ScannerExecution]]:
     """Run or load scanner outputs and return a scan result."""
 
-    started_at = datetime.now(UTC)
-    executions: list[ScannerExecution] = []
-
-    if config.checkov_enabled:
-        checkov = CheckovScanner()
-        if getattr(args, "checkov_json", None):
-            executions.append(checkov.from_file(Path(args.checkov_json), config.repository_path))
-        else:
-            executions.append(
-                checkov.run(config.repository_path, timeout_seconds=int(args.timeout))
-            )
-    else:
-        executions.append(
-            ScannerExecution(
-                "checkov",
-                ScannerStatus("checkov", "skipped", "disabled by configuration"),
-                [],
-            )
-        )
-
-    if config.trivy_enabled:
-        trivy = TrivyScanner(secret_scanning=config.trivy_secret_scanning)
-        if getattr(args, "trivy_json", None):
-            executions.append(trivy.from_file(Path(args.trivy_json), config.repository_path))
-        else:
-            executions.append(trivy.run(config.repository_path, timeout_seconds=int(args.timeout)))
-    else:
-        executions.append(
-            ScannerExecution(
-                "trivy",
-                ScannerStatus("trivy", "skipped", "disabled by configuration"),
-                [],
-            )
-        )
-
-    completed_at = datetime.now(UTC)
-    findings = [finding for execution in executions for finding in execution.findings]
-    for finding in findings:
-        finding.first_seen = finding.first_seen or started_at
-        finding.last_seen = completed_at
-    repository, branch, commit_sha = detect_repository_metadata(config.repository_path)
-    scanner_statuses = {execution.scanner: execution.status for execution in executions}
-    scan = ScanResult(
-        repository=repository,
-        branch=branch,
-        commit_sha=commit_sha,
-        started_at=started_at,
-        completed_at=completed_at,
-        scanner_statuses=scanner_statuses,
-        findings=findings,
-        health_score=calculate_health_score(findings),
-        summary={
-            "active_findings": len(active_findings(findings)),
-            "new_findings": len(findings),
-            "recurring_findings": 0,
-            "resolved_findings": 0,
-            "severity_changes": 0,
-        },
+    return run_scan(
+        config,
+        timeout_seconds=int(args.timeout),
+        checkov_json=Path(args.checkov_json) if getattr(args, "checkov_json", None) else None,
+        trivy_json=Path(args.trivy_json) if getattr(args, "trivy_json", None) else None,
+        compare_with_previous=compare_with_previous,
     )
-    if compare_with_previous:
-        compare_scans(scan, None)
-    return scan, executions
-
-
-def detect_repository_metadata(repository_path: Path) -> tuple[str, str, str]:
-    """Detect repository name, branch, and commit SHA from GitHub Actions or Git."""
-
-    repository = os.environ.get("GITHUB_REPOSITORY") or _git_remote_repository(repository_path)
-    branch = os.environ.get("GITHUB_REF_NAME") or _git_output(
-        repository_path, ["git", "rev-parse", "--abbrev-ref", "HEAD"]
-    )
-    commit_sha = os.environ.get("GITHUB_SHA") or _git_output(
-        repository_path, ["git", "rev-parse", "HEAD"]
-    )
-    return (
-        repository or repository_path.name,
-        branch or "unknown",
-        commit_sha or "unknown",
-    )
-
-
-def _git_remote_repository(repository_path: Path) -> str | None:
-    remote = _git_output(repository_path, ["git", "config", "--get", "remote.origin.url"])
-    if not remote:
-        return None
-    if remote.endswith(".git"):
-        remote = remote[:-4]
-    if remote.startswith("git@github.com:"):
-        return remote.removeprefix("git@github.com:")
-    if "github.com/" in remote:
-        return remote.split("github.com/", 1)[1]
-    return remote
-
-
-def _git_output(repository_path: Path, args: list[str]) -> str | None:
-    try:
-        completed = subprocess.run(
-            args,
-            cwd=repository_path,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if completed.returncode != 0:
-        return None
-    output = completed.stdout.strip()
-    return output or None
 
 
 def _config_from_args(args: argparse.Namespace) -> Config:
@@ -357,6 +301,33 @@ def _add_scanner_input_args(parser: argparse.ArgumentParser) -> None:
         "--checkov-json", type=Path, help="Load Checkov JSON instead of running checkov."
     )
     parser.add_argument("--trivy-json", type=Path, help="Load Trivy JSON instead of running trivy.")
+
+
+def _add_analysis_args(parser: argparse.ArgumentParser, *, default_workers: int) -> None:
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path(".driftbeacon-analysis"),
+        help="Directory for per-repository reports and analysis summaries.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=default_workers,
+        help="Number of repositories to analyse in parallel.",
+    )
+    parser.add_argument(
+        "--keep",
+        action="store_true",
+        help="Keep temporary clones after analysis for debugging.",
+    )
+    parser.add_argument("--timeout", type=int, default=300, help="Scanner timeout in seconds.")
+    parser.add_argument(
+        "--clone-timeout",
+        type=int,
+        default=300,
+        help="Git clone timeout in seconds per repository.",
+    )
 
 
 def _threshold_exit_code(config: Config, scan: ScanResult) -> int:
