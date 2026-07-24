@@ -21,7 +21,8 @@ def test_priority_order_considers_more_than_severity(
     assert len(top) == 3
     assert "CKV_AWS_19" not in {item.finding.rule_id for item in top}
     assert top[0].score >= top[-1].score
-    assert "Ranked highly because" in top[0].reason
+    assert "critical-severity" in top[0].reason
+    assert "remediation guidance" in top[0].reason
 
 
 def test_production_and_blast_radius_raise_priority(current_scan: ScanResult) -> None:

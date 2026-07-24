@@ -9,6 +9,7 @@ from driftbeacon.models import ScannerStatus
 from driftbeacon.normalise import normalise_checkov
 
 from .base import (
+    SCANNER_SKIP_PATTERNS,
     ScannerExecution,
     executable_exists,
     load_json_file,
@@ -41,8 +42,13 @@ class CheckovScanner:
                 findings=[],
             )
 
+        command = ["checkov", "-d", str(repository_path), "-o", "json", "--quiet"]
+        command.append("--skip-download")
+        for pattern in SCANNER_SKIP_PATTERNS:
+            command.extend(["--skip-path", pattern])
+
         stdout, stderr, _returncode, status, _duration = run_subprocess(
-            ["checkov", "-d", str(repository_path), "-o", "json", "--quiet"],
+            command,
             cwd=repository_path,
             scanner=self.name,
             timeout_seconds=timeout_seconds,

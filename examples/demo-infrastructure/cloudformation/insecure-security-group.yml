@@ -1,0 +1,30 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "DriftBeacon demo-only insecure CloudFormation template. Do not deploy."
+
+Parameters:
+  DemoDeploymentGuard:
+    Type: String
+    Default: DO_NOT_DEPLOY
+    AllowedValues:
+      - DO_NOT_DEPLOY
+
+Rules:
+  NeverDeployDemoTemplate:
+    Assertions:
+      - Assert: !Equals [!Ref DemoDeploymentGuard, I_UNDERSTAND_THIS_IS_INSECURE]
+        AssertDescription: "This intentionally insecure demo template is blocked from deployment."
+
+Resources:
+  DemoOpenSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Demo-only security group with intentionally open ingress
+      VpcId: vpc-00000000000000000
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0

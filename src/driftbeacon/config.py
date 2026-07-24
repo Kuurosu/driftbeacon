@@ -157,8 +157,7 @@ def _discover_config_path(repository_path: Path, config_path: str | Path | None)
     default_path = repository_path / ".driftbeacon.yml"
     if default_path.exists():
         return default_path
-    legacy_path = repository_path / ".DriftBeacon.yml"
-    return legacy_path if legacy_path.exists() else None
+    return None
 
 
 def _apply_mapping(config: Config, data: dict[str, Any]) -> None:

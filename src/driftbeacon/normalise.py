@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -320,7 +321,35 @@ def _normalise_path(value: object, repository_path: Path | None = None) -> str |
         path = path[2:]
     if path.startswith("/") and not Path(path).exists():
         path = path[1:]
+    path = _strip_repository_prefix(path, repository_path)
     return path or None
+
+
+def _strip_repository_prefix(path: str, repository_path: Path | None) -> str:
+    if repository_path is None:
+        return path
+    candidates: set[str] = set()
+    raw_repo = repository_path.as_posix().strip("/")
+    if raw_repo and raw_repo != ".":
+        candidates.add(raw_repo)
+    try:
+        resolved_path = repository_path.resolve()
+        resolved_repo = resolved_path.as_posix().strip("/")
+    except (OSError, RuntimeError):
+        resolved_repo = ""
+        resolved_path = None
+    if resolved_repo:
+        candidates.add(resolved_repo)
+    if resolved_path is not None:
+        with suppress(ValueError):
+            candidates.add(resolved_path.relative_to(Path.cwd().resolve()).as_posix())
+
+    for prefix in sorted(candidates, key=len, reverse=True):
+        if path == prefix:
+            return ""
+        if path.startswith(prefix + "/"):
+            return path[len(prefix) + 1 :]
+    return path
 
 
 def _line_from_checkov(value: object) -> int | None:

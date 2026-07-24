@@ -9,6 +9,7 @@ from driftbeacon.models import ScannerStatus
 from driftbeacon.normalise import normalise_trivy
 
 from .base import (
+    SCANNER_SKIP_PATTERNS,
     ScannerExecution,
     executable_exists,
     load_json_file,
@@ -59,17 +60,23 @@ class TrivyScanner:
         scanners = "vuln,misconfig"
         if self.secret_scanning:
             scanners += ",secret"
+        command = [
+            "trivy",
+            "fs",
+            "--format",
+            "json",
+            "--scanners",
+            scanners,
+            "--quiet",
+            "--skip-check-update",
+            "--skip-version-check",
+        ]
+        for pattern in SCANNER_SKIP_PATTERNS:
+            command.extend(["--skip-dirs", pattern])
+        command.append(str(repository_path))
+
         stdout, stderr, _returncode, status, _duration = run_subprocess(
-            [
-                "trivy",
-                "fs",
-                "--format",
-                "json",
-                "--scanners",
-                scanners,
-                "--quiet",
-                str(repository_path),
-            ],
+            command,
             cwd=repository_path,
             scanner=self.name,
             timeout_seconds=timeout_seconds,

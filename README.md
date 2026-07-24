@@ -17,6 +17,7 @@ It is intentionally not a hosted SaaS, chatbot, dashboard, database-backed platf
 - Produces a concise Markdown report and stores JSON scan state.
 - Posts a short Slack summary when `SLACK_WEBHOOK_URL` is configured.
 - Works locally, including a sample run that does not require scanners.
+- Includes safe, intentionally insecure demo infrastructure and captured scanner output for public demos.
 
 ## Architecture
 
@@ -134,8 +135,10 @@ The weekly workflow:
 - Runs every Monday at 08:00 UTC.
 - Supports manual `workflow_dispatch`.
 - Installs Python, DriftBeacon, Checkov, and Trivy.
+- Uses pip caching to keep repeated runs fast.
 - Restores the previous scan using GitHub Actions cache.
 - Uploads `report.md`, `current-scan.json`, and `comparison-summary.json` as artifacts.
+- Writes the Markdown report to the GitHub Actions job summary.
 - Sends Slack only when the `SLACK_WEBHOOK_URL` secret exists.
 
 The pull request workflow:
@@ -217,9 +220,18 @@ make run-sample
 cat .driftbeacon-sample/report.md
 ```
 
+For a real scanner-backed demo, see:
+
+- `examples/demo-infrastructure/` for safe intentionally insecure infrastructure.
+- `examples/scans/checkov-demo.json` and `examples/scans/trivy-demo.json` for captured scanner output.
+- `examples/scans/driftbeacon-demo-report.md` for a first-scan report.
+- `examples/scans/driftbeacon-history-report.md` for new, recurring, resolved, and health delta states.
+
+Nothing under `examples/demo-infrastructure/` should be deployed. The Terraform module requires an impossible Terraform version as a guardrail.
+
 ## Health Score
 
-The score starts at 100. Active findings subtract weighted penalties:
+Active findings add weighted raw penalties:
 
 - Critical: 25
 - High: 12
@@ -228,7 +240,9 @@ The score starts at 100. Active findings subtract weighted penalties:
 - Info: 0
 - Unknown: 3
 
-New findings use a 1.2 multiplier. Recurring findings use a 1.0 multiplier. Resolved findings do not count against the active score. Per-severity caps and a total active penalty cap prevent large repositories from always scoring zero.
+New findings use a 1.2 multiplier. Recurring findings use a 1.0 multiplier. Resolved findings do not count against the active score.
+
+DriftBeacon converts raw penalties into a 0 to 100 score with a diminishing-returns curve. This keeps very noisy repositories from flattening to the same score while still making trend deltas visible.
 
 The report trend compares the current score with the previous scan score.
 

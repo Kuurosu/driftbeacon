@@ -1,5 +1,11 @@
-.DriftBeacon/
+.driftbeacon/
+.driftbeacon-demo/
 .driftbeacon-sample/
+.driftbeacon-history/
+**/.driftbeacon/
+**/.driftbeacon-demo/
+**/.driftbeacon-sample/
+**/.driftbeacon-history/
 .venv/
 .venv.broken.*/
 __pycache__/

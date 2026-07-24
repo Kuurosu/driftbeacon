@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: driftbeacon-demo-privileged-pod-do-not-apply-
+  labels:
+    app: driftbeacon-demo
+spec:
+  hostNetwork: true
+  containers:
+    - name: app
+      image: nginx:latest
+      securityContext:
+        privileged: true
+        allowPrivilegeEscalation: true
+        runAsUser: 0
+      ports:
+        - containerPort: 80

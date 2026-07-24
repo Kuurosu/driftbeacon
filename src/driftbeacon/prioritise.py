@@ -100,16 +100,16 @@ def priority_reason(
 ) -> str:
     """Explain why the finding was ranked highly."""
 
-    parts = [f"{finding.status} {finding.severity}-severity {finding.category} issue"]
+    parts = [f"{finding.status.capitalize()} {finding.severity}-severity {finding.category} issue"]
     if is_production_like(finding.file_path, production_patterns):
-        parts.append("affecting a production-like path")
+        parts.append("in a production-like path")
     if blast_radius_bonus(finding) >= 15:
         parts.append("with broad blast radius indicators")
     if recurrence_bonus(finding, now or datetime.now(UTC)) > 0:
-        parts.append("that has recurred across scans")
+        parts.append("seen across previous scans")
     if finding.remediation or finding.documentation_url:
-        parts.append("with remediation guidance available")
-    return "Ranked highly because it is a " + " ".join(parts) + "."
+        parts.append("with remediation guidance")
+    return " ".join(parts) + "."
 
 
 def is_production_like(

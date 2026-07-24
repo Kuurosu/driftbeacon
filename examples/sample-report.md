@@ -1,37 +1,42 @@
-# DriftBeacon Weekly
-**Repository:** driftbeacon-mvp  
-**Branch:** unknown  
-**Commit:** `unknown`  
-**Health score:** 12/100, down 59 points  
+# DriftBeacon Report
+
+## At a glance
+**Repository:** Kuurosu/driftbeacon  
+**Branch:** main  
+**Commit:** `e1bddb6bb0a3`  
+**Health score:** 50/100 (down 21 points)  
 **Active findings:** 6  
-**New:** 4  
-**Resolved:** 1
+**Trend:** 4 new findings, 2 recurring findings, 1 resolved finding, health score down 21 points
+
+## What happened
+Scanner status: 2 successful scanners. DriftBeacon normalized 6 active findings. Health is 50/100.
+
+## What changed
+- 4 new findings
+- 2 recurring findings
+- 1 resolved finding
+- 1 severity change
+- Health score down 21 points
 
 ## Fix these first
 ### 1. AWS Access Key ID
-**Severity:** Critical  
+**Severity:** Critical | **Category:** secret  
 **Location:** terraform/production/secrets.tf:4  
-**Why this matters:** Ranked highly because it is a new critical-severity secret issue affecting a production-like path with remediation guidance available.  
-**Recommended action:** Remove the hardcoded secret and rotate it if it was committed.
+**Why:** New critical-severity secret issue in a production-like path with remediation guidance.  
+**Action:** Remove the hardcoded secret and rotate it if it was committed.
 
 ### 2. Container allows privilege escalation
-**Severity:** Critical  
+**Severity:** Critical | **Category:** container  
 **Location:** k8s/production/deployment.yaml:31  
-**Why this matters:** Ranked highly because it is a new critical-severity container issue affecting a production-like path with remediation guidance available.  
-**Recommended action:** Set allowPrivilegeEscalation to false.
+**Why:** New critical-severity container issue in a production-like path with remediation guidance.  
+**Action:** Set allowPrivilegeEscalation to false.
 
 ### 3. S3 bucket allows public read access
-**Severity:** High  
+**Severity:** High | **Category:** storage  
 **Location:** terraform/production/s3.tf:7  
-**Why this matters:** Ranked highly because it is a new high-severity storage issue affecting a production-like path with broad blast radius indicators with remediation guidance available.  
-**Recommended action:** Disable public ACLs and enable S3 Block Public Access.
+**Why:** New high-severity storage issue in a production-like path with broad blast radius indicators with remediation guidance.  
+**Action:** Disable public ACLs and enable S3 Block Public Access.
 
-
-## Changes since the previous scan
-- 4 new findings
-- 1 resolved finding
-- 2 recurring findings
-- 1 severity change
 
 ## Scanner status
 - Checkov: Success: loaded 3 findings from JSON

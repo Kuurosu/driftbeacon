@@ -17,7 +17,9 @@ def test_report_generation_includes_summary_and_scanner_failure(
     comparison = compare_scans(current_scan, previous_scan)
     report = generate_report(current_scan, comparison)
 
-    assert "# DriftBeacon Weekly" in report
+    assert "# DriftBeacon Report" in report
+    assert "What happened" in report
+    assert "What changed" in report
     assert "Fix these first" in report
     assert "1 resolved finding" in report
     assert "Trivy: Partial" in report

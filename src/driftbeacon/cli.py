@@ -41,17 +41,36 @@ def main(argv: Sequence[str] | None = None) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="driftbeacon",
-        description="Scan infrastructure repositories and generate concise operational reports.",
+        description=(
+            "Scan infrastructure repositories with Checkov and Trivy, compare findings with "
+            "the previous run, and generate Markdown or Slack-ready operational reports."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  driftbeacon run --repository-path . --output-dir .driftbeacon --no-slack\n"
+            "  driftbeacon run --checkov-json examples/sample-checkov.json "
+            "--trivy-json examples/sample-trivy.json --no-slack\n"
+            "  driftbeacon send-slack --report-file .driftbeacon/report.md"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version="driftbeacon 0.1.0")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(
+        dest="command",
+        metavar="{scan,report,compare,send-slack,run}",
+        required=True,
+    )
 
-    scan_parser = subparsers.add_parser("scan", help="Run scanners and save normalized output.")
+    scan_parser = subparsers.add_parser(
+        "scan", help="Run scanners and save normalized finding JSON."
+    )
     _add_config_args(scan_parser)
     _add_scanner_input_args(scan_parser)
     scan_parser.add_argument("--timeout", type=int, default=300, help="Scanner timeout in seconds.")
 
-    report_parser = subparsers.add_parser("report", help="Generate Markdown from scan JSON.")
+    report_parser = subparsers.add_parser(
+        "report", help="Generate a Markdown report from scan JSON."
+    )
     report_parser.add_argument("--scan-file", required=True, type=Path)
     report_parser.add_argument("--previous-scan", type=Path)
     report_parser.add_argument("--output-file", type=Path)
@@ -59,18 +78,20 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser.add_argument("--top-findings", type=int, default=None)
 
     compare_parser = subparsers.add_parser(
-        "compare", help="Compare current and previous scan JSON."
+        "compare", help="Compare current and previous DriftBeacon scan JSON."
     )
     compare_parser.add_argument("--current-scan", required=True, type=Path)
     compare_parser.add_argument("--previous-scan", type=Path)
     compare_parser.add_argument("--output-file", type=Path)
 
-    slack_parser = subparsers.add_parser("send-slack", help="Send an existing report to Slack.")
+    slack_parser = subparsers.add_parser(
+        "send-slack", help="Send an existing Markdown report to Slack."
+    )
     slack_parser.add_argument("--report-file", required=True, type=Path)
     slack_parser.add_argument("--slack-webhook-env", default="SLACK_WEBHOOK_URL")
 
     run_parser = subparsers.add_parser(
-        "run", help="Run scan, compare, report, store, and Slack steps."
+        "run", help="Run scan, compare, report, store, and optional Slack delivery."
     )
     _add_config_args(run_parser)
     _add_scanner_input_args(run_parser)

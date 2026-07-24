@@ -14,8 +14,11 @@
 - Added a small YAML-subset parser to avoid adding PyYAML as a runtime dependency.
 - Exposed a single `driftbeacon` console script to avoid case-only script collisions on macOS filesystems.
 - Hardened `scripts/install-local.sh` so it moves a broken `.venv` aside and recreates it when pip cannot cleanly uninstall an old editable install.
-- Converted Markdown reports into Slack-native `mrkdwn` summaries so Slack messages keep readable line breaks.
+- Converted Markdown reports into Slack Block Kit digests with summary, top priorities, scanner status, and artifact context.
 - Made `make run-sample` and the local `driftbeacon` launcher run directly from `src/` so local commands do not depend on editable-install `.pth` behavior.
+- Added safe intentionally insecure demo infrastructure with Terraform, Docker, Kubernetes, and CloudFormation fixtures.
+- Captured real Checkov and Trivy JSON under `examples/scans/`.
+- Updated scoring to use weighted findings with a diminishing-returns curve so noisy repositories still show trend deltas.
 
 ## Commands Executed
 
@@ -32,19 +35,25 @@ make lint
 make typecheck
 make run-sample
 .venv/bin/python -m driftbeacon scan --repository-path /private/tmp/driftbeacon-mvp --output-dir /private/tmp/driftbeacon-mvp/.driftbeacon-missing-scanners
+checkov -d examples/demo-infrastructure -o json --quiet --skip-download
+trivy fs --format json --scanners misconfig,secret --quiet --skip-check-update examples/demo-infrastructure
 ```
 
 ## Tests Run
 
-- `python -m pytest`: 19 passed.
+- `python -m pytest`: 24 passed.
 - `ruff check .`: passed.
-- `mypy src`: passed.
-- `make test`: 19 passed.
+- `mypy src`: passed for 17 source files.
+- `make test`: passed.
 - `make lint`: passed.
 - `make typecheck`: passed.
 - `make run-sample`: generated `.driftbeacon-sample/report.md`, `current-scan.json`, and `comparison-summary.json`.
 - CLI help verified for the root command and `run` command.
 - Missing scanner handling verified locally. Checkov and Trivy were recorded as `skipped` when no executables were available.
+- Checkov demo validation captured 52 failed checks.
+- Trivy demo validation captured 41 misconfigurations.
+- Historical comparison captured 18 new findings, 90 recurring findings, 3 resolved findings, and a 1 point health score increase.
+- Slack Block Kit payload validated locally from `examples/scans/driftbeacon-history-report.md`.
 
 ## Known Limitations
 
@@ -54,6 +63,7 @@ make run-sample
 - Scanner integration tests are not included because the MVP unit suite must not require local Checkov or Trivy installs.
 - The workflows install Checkov and Trivy at run time, so first runs depend on public package availability.
 - Local scans without Git metadata show repository name from the folder and `unknown` branch/commit.
+- The demo infrastructure is intentionally invalid or guarded against accidental deployment, but it remains syntactically parseable for static scanners.
 
 ## Recommended Next Steps
 

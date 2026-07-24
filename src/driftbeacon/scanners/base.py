@@ -17,7 +17,9 @@ from driftbeacon.redaction import redact_secrets, truncate
 IGNORED_DIRS = {
     ".git",
     ".driftbeacon",
+    ".driftbeacon-demo",
     ".driftbeacon-history",
+    ".driftbeacon-sample",
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",
@@ -27,6 +29,19 @@ IGNORED_DIRS = {
     "node_modules",
     "venv",
 }
+
+SCANNER_SKIP_PATTERNS = (
+    ".git",
+    ".driftbeacon",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "venv",
+)
 
 
 @dataclass(slots=True)
@@ -55,7 +70,9 @@ def safe_walk(repository_path: Path) -> list[Path]:
         dirnames[:] = [
             dirname
             for dirname in dirnames
-            if dirname not in IGNORED_DIRS and not (Path(root) / dirname).is_symlink()
+            if dirname not in IGNORED_DIRS
+            and not dirname.startswith(".driftbeacon")
+            and not (Path(root) / dirname).is_symlink()
         ]
         for filename in filenames:
             path = Path(root) / filename
