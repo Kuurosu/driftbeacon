@@ -19,6 +19,21 @@ from statistics import median
 from typing import Any
 
 from . import __version__
+from .analysis_metrics import (
+    DensityMetrics,
+    ScannerResult,
+    classify_repository,
+    density_metrics,
+    directory_group_breakdown,
+    enrich_findings_for_analysis,
+    evaluate_score,
+    excluded_finding_counts,
+    finding_source_breakdown,
+    scanner_issue_rows,
+    scanner_result_from_execution,
+    source_label,
+    top_paths_by_findings,
+)
 from .comparison import compare_scans
 from .config import load_config
 from .models import Finding, ScanResult, Severity
@@ -27,8 +42,17 @@ from .redaction import redact_secrets, truncate
 from .reporting import generate_report
 from .scan import run_scan
 from .scanners.base import safe_walk
+from .scanners.checkov import has_relevant_files as checkov_applies
 from .scanners.trivy import DEPENDENCY_FILES
-from .scoring import actionable_active_findings, actionable_findings, severity_counts
+from .scanners.trivy import has_relevant_files as trivy_applies
+from .scoring import (
+    HEALTH_RISK_SCALE,
+    SCORE_FORMULA_VERSION,
+    SEVERITY_WEIGHTS,
+    actionable_active_findings,
+    actionable_findings,
+    severity_counts,
+)
 from .storage import LocalStorage
 
 ProgressWriter = Callable[[str], None]
@@ -43,6 +67,7 @@ class AnalysisOptions:
     keep: bool = False
     scanner_timeout_seconds: int = 300
     clone_timeout_seconds: int = 300
+    exclude_path_groups: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +119,11 @@ class RepositoryAnalysisResult:
     clone_path: Path | None
     error: str | None = None
     category: str = "Unknown"
+    category_confidence: str = "low"
+    category_evidence: tuple[str, ...] = field(default_factory=tuple)
+    score_state: str = "scored"
+    coverage_state: str = "complete_coverage"
+    score_reason: str = ""
     low_findings: int = 0
     total_findings: int = 0
     resolved_findings: int = 0
@@ -111,6 +141,15 @@ class RepositoryAnalysisResult:
     checkov_status: str = "unknown"
     trivy_status: str = "unknown"
     finding_summaries: tuple[FindingSummary, ...] = field(default_factory=tuple)
+    scanner_results: tuple[ScannerResult, ...] = field(default_factory=tuple)
+    density: DensityMetrics = field(
+        default_factory=lambda: DensityMetrics(0, 0, None, None, None)
+    )
+    finding_source_breakdown: dict[str, dict[str, int]] = field(default_factory=dict)
+    directory_group_breakdown: dict[str, dict[str, int]] = field(default_factory=dict)
+    excluded_finding_counts: dict[str, int] = field(default_factory=dict)
+    top_directories: tuple[dict[str, int | str], ...] = field(default_factory=tuple)
+    top_files: tuple[dict[str, int | str], ...] = field(default_factory=tuple)
 
     @property
     def succeeded(self) -> bool:
@@ -121,10 +160,8 @@ class RepositoryAnalysisResult:
         return health_grade(self.health_score)
 
     @property
-    def findings_per_100_files(self) -> float:
-        if self.supported_files <= 0:
-            return 0.0
-        return round((self.total_findings / self.supported_files) * 100, 1)
+    def findings_per_100_supported_files(self) -> float | None:
+        return self.density.findings_per_100_supported_files
 
     @property
     def scan_mode(self) -> str:
@@ -133,6 +170,8 @@ class RepositoryAnalysisResult:
     def one_line_summary(self) -> str:
         if not self.succeeded:
             return f"{self.repository}: failed: {self.error or 'unknown error'}"
+        if self.health_score is None:
+            return f"{self.repository}: not scored ({self.score_reason})"
         return (
             f"{self.repository}: health={self.health_score} "
             f"critical={self.critical_findings} high={self.high_findings} "
@@ -146,9 +185,15 @@ class RepositoryAnalysisResult:
             "git_url": self.git_url,
             "status": self.status,
             "scan_mode": self.scan_mode,
+            "repository_category": self.category,
             "category": self.category,
+            "category_confidence": self.category_confidence,
+            "category_evidence": list(self.category_evidence),
             "health_score": self.health_score,
             "grade": self.grade,
+            "score_state": self.score_state,
+            "coverage_state": self.coverage_state,
+            "score_reason": self.score_reason,
             "critical": self.critical_findings,
             "high": self.high_findings,
             "medium": self.medium_findings,
@@ -158,7 +203,8 @@ class RepositoryAnalysisResult:
             "resolved_findings": self.resolved_findings if self.has_baseline else None,
             "recurring_findings": self.recurring_findings if self.has_baseline else None,
             "supported_files": self.supported_files,
-            "findings_per_100_files": self.findings_per_100_files,
+            **self.density.to_dict(),
+            "findings_per_100_supported_files": self.findings_per_100_supported_files,
             "report_path": _relative_path_text(self.report_path, output_dir),
             "scan_path": _relative_path_text(self.scan_path, output_dir),
             "clone_path": clone_path,
@@ -166,6 +212,13 @@ class RepositoryAnalysisResult:
                 "checkov": self.checkov_status,
                 "trivy": self.trivy_status,
             },
+            "scanner_results": [result.to_dict() for result in self.scanner_results],
+            "finding_source_breakdown": self.finding_source_breakdown,
+            "directory_group_breakdown": self.directory_group_breakdown,
+            "excluded_finding_counts": self.excluded_finding_counts,
+            "top_directories": list(self.top_directories),
+            "top_files": list(self.top_files),
+            "score_formula_version": SCORE_FORMULA_VERSION,
             "audit": {
                 "raw_scanner_results": self.raw_scanner_results,
                 "normalised_findings": self.normalised_findings,
@@ -286,15 +339,65 @@ def analyse_repository(
         previous_scan = _load_existing_scan(repo_output_dir)
         clone_repository(task.git_url, clone_path, timeout_seconds=options.clone_timeout_seconds)
         supported_files = detect_supported_infrastructure_files(clone_path)
+        repository = redact_secrets(repository_full_name_from_url(task.git_url))
+        category = classify_repository(repository, clone_path, supported_files)
         config = load_config(
             repository_path=clone_path,
             output_dir=repo_output_dir,
             no_slack=True,
         )
-        scan, _executions = run_scan(config, timeout_seconds=options.scanner_timeout_seconds)
-        comparison = compare_scans(scan, previous_scan)
-        top = prioritise_findings(
+        scan, executions = run_scan(config, timeout_seconds=options.scanner_timeout_seconds)
+        enrich_findings_for_analysis(
             scan.findings,
+            excluded_path_groups=options.exclude_path_groups,
+        )
+        scanner_results = tuple(
+            scanner_result_from_execution(
+                repository,
+                execution,
+                applicable=_scanner_applicable(execution.scanner, clone_path),
+            )
+            for execution in executions
+        )
+        score = evaluate_score(
+            scan.findings,
+            supported_file_count=len(supported_files),
+            scanner_results=scanner_results,
+        )
+        source_breakdown = finding_source_breakdown(
+            scan.findings,
+            include_repositories=(repository,),
+        )
+        group_breakdown = directory_group_breakdown(scan.findings)
+        excluded_counts = excluded_finding_counts(scan.findings)
+        top_directories = tuple(top_paths_by_findings(scan.findings, by_file=False))
+        top_files = tuple(top_paths_by_findings(scan.findings, by_file=True))
+        scan.health_score = score.health_score
+        scan.summary = {
+            **scan.summary,
+            "score_state": score.score_state,
+            "coverage_state": score.coverage_state,
+            "score_reason": score.score_reason,
+            "score_formula_version": SCORE_FORMULA_VERSION,
+            "excluded_path_groups": ",".join(options.exclude_path_groups),
+            "finding_source_breakdown": source_breakdown,
+            "directory_group_breakdown": group_breakdown,
+            "excluded_finding_counts": excluded_counts,
+            "top_directories": list(top_directories),
+            "top_files": list(top_files),
+        }
+        comparison = compare_scans(scan, previous_scan)
+        if score.health_score is None:
+            scan.health_score = None
+            comparison.health_score_change = None
+        scan.summary = {
+            **scan.summary,
+            "score_state": score.score_state,
+            "coverage_state": score.coverage_state,
+            "score_reason": score.score_reason,
+        }
+        top = prioritise_findings(
+            [finding for finding in scan.findings if not finding.excluded_from_score],
             limit=config.top_findings,
             production_patterns=config.production_patterns,
         )
@@ -312,7 +415,7 @@ def analyse_repository(
         counts = severity_counts(scan.findings)
         actionable = actionable_active_findings(scan.findings)
         total_findings = sum(counts[severity] for severity in ("critical", "high", "medium", "low"))
-        repository = redact_secrets(repository_full_name_from_url(task.git_url))
+        density = density_metrics(scan.findings, supported_files)
         return RepositoryAnalysisResult(
             index=task.index,
             git_url=redact_secrets(task.git_url),
@@ -331,7 +434,12 @@ def analyse_repository(
             report_path=report_path,
             scan_path=scan_path,
             clone_path=kept_clone_path,
-            category=detect_repository_category(repository, supported_files),
+            category=category.category,
+            category_confidence=category.confidence,
+            category_evidence=category.evidence,
+            score_state=score.score_state,
+            coverage_state=score.coverage_state,
+            score_reason=score.score_reason,
             low_findings=counts["low"],
             total_findings=total_findings,
             resolved_findings=len(actionable_findings(comparison.resolved_findings))
@@ -353,6 +461,13 @@ def analyse_repository(
             checkov_status=_scanner_status_text(scan, "checkov"),
             trivy_status=_scanner_status_text(scan, "trivy"),
             finding_summaries=finding_summaries(actionable),
+            scanner_results=score.scanner_results,
+            density=density,
+            finding_source_breakdown=source_breakdown,
+            directory_group_breakdown=group_breakdown,
+            excluded_finding_counts=excluded_counts,
+            top_directories=top_directories,
+            top_files=top_files,
         )
     except Exception as exc:
         return _failure_result(task, truncate(redact_secrets(str(exc)), 300), kept_clone_path)
@@ -383,6 +498,14 @@ def clone_repository(git_url: str, clone_path: Path, *, timeout_seconds: int) ->
         raise ValueError(f"git clone failed: {truncate(redact_secrets(message), 260)}")
 
 
+def _scanner_applicable(scanner: str, repository_path: Path) -> bool:
+    if scanner == "checkov":
+        return checkov_applies(repository_path)
+    if scanner == "trivy":
+        return trivy_applies(repository_path)
+    return True
+
+
 def detect_supported_infrastructure_files(repository_path: Path) -> list[Path]:
     """Return files that existing DriftBeacon scanners can inspect."""
 
@@ -396,20 +519,7 @@ def detect_supported_infrastructure_files(repository_path: Path) -> list[Path]:
 def detect_repository_category(repository: str, supported_files: Sequence[Path]) -> str:
     """Classify a repository into a broad, explainable bucket."""
 
-    name = repository.lower()
-    repo_name = name.rsplit("/", 1)[-1]
-    if any(word in name for word in ("guide", "example", "learn", "sample", "demo", "tutorial")):
-        return "Examples or guides"
-    if repo_name.startswith("terraform-provider-"):
-        return "Terraform provider"
-    file_kinds = _file_kinds(supported_files)
-    if repo_name.startswith("terraform-") and "terraform" in file_kinds:
-        return "Terraform module"
-    if _looks_like_kubernetes_project(name, supported_files):
-        return "Kubernetes project"
-    if len(file_kinds) >= 2:
-        return "Mixed infrastructure repository"
-    return "Unknown"
+    return classify_repository(repository, Path("."), supported_files).category
 
 
 def write_analysis_summaries(
@@ -440,10 +550,12 @@ def analysis_summary_markdown(
     """Render a Markdown summary ranked by lowest health score first."""
 
     timestamp = generated_at or datetime.now(UTC)
-    successes = _ranked_successes(results)
+    successes = [result for result in results if result.succeeded]
+    ranked = _ranked_successes(results)
+    unscored = [result for result in successes if result.health_score is None]
     failures = [result for result in results if not result.succeeded]
     stats = aggregate_statistics(results)
-    include_comparison = any(result.has_baseline for result in successes)
+    include_comparison = any(result.has_baseline for result in ranked)
     lines = [
         "# DriftBeacon Repository Analysis Summary",
         "",
@@ -452,6 +564,8 @@ def analysis_summary_markdown(
         f"**Repositories requested:** {len(results)}  ",
         f"**Successful scans:** {len(successes)}  ",
         f"**Failed scans:** {len(failures)}  ",
+        f"**Scored repositories:** {len(ranked)}  ",
+        f"**Unscored repositories:** {len(unscored)}  ",
         f"**Run type:** {_scan_mode_label(results)}",
         "",
         "## Executive summary",
@@ -469,14 +583,20 @@ def analysis_summary_markdown(
         _leaderboard_header(include_comparison),
         _leaderboard_separator(include_comparison),
     ]
-    if successes:
-        for rank, result in enumerate(successes, start=1):
+    if ranked:
+        for rank, result in enumerate(ranked, start=1):
             lines.append(_leaderboard_row(rank, result, output_dir, include_comparison))
     else:
         lines.append(_empty_leaderboard_row(include_comparison))
 
+    lines.extend(_unscored_repositories_section(unscored, output_dir))
+    lines.extend(_finding_source_breakdown_section(results))
+    lines.extend(_directory_breakdown_section(results))
+    lines.extend(_top_paths_section(results, "top_directories", "Top directories", "Directory"))
+    lines.extend(_top_paths_section(results, "top_files", "Top files", "File"))
     lines.extend(_common_findings_section(results))
     lines.extend(_scanner_coverage_section(results))
+    lines.extend(_scanner_issues_section(results))
     lines.extend(_failed_repositories_section(failures))
     lines.extend(
         [
@@ -491,7 +611,18 @@ def analysis_summary_markdown(
             "- Large and small repositories are not directly comparable by raw finding count.",
             "- Results should not be presented as an accusation against maintainers.",
             "- Health uses deduplicated active critical, high, medium, and low findings only.",
+            "- Scores require meaningful scanner coverage.",
+            "- A clean result with zero scanned files is unscored, not healthy.",
+            "- Partial scanner failures produce partial coverage.",
+            "- Findings from examples, tests, fixtures, generated content, and vendor paths are "
+            "broken out separately.",
+            "- Findings per 100 supported files is a density, not a percentage.",
+            "- Configuration findings and dependency vulnerabilities are different risk classes.",
             "- Informational and unknown-severity findings are audited but ignored by the score.",
+            "- Health formula: "
+            f"{SCORE_FORMULA_VERSION}; weights critical={SEVERITY_WEIGHTS['critical']}, "
+            f"high={SEVERITY_WEIGHTS['high']}, medium={SEVERITY_WEIGHTS['medium']}, "
+            f"low={SEVERITY_WEIGHTS['low']}; scale={HEALTH_RISK_SCALE}.",
             "",
         ]
     )
@@ -508,10 +639,21 @@ def analysis_summary_json(
     timestamp = generated_at or datetime.now(UTC)
     failures = [result for result in results if not result.succeeded]
     return {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "metadata": {
             "scan_date": timestamp.isoformat(),
             "driftbeacon_version": __version__,
+            "score_formula_version": SCORE_FORMULA_VERSION,
+            "score_formula": {
+                "model": "exponential_decay",
+                "scale": HEALTH_RISK_SCALE,
+                "weights": {
+                    "critical": SEVERITY_WEIGHTS["critical"],
+                    "high": SEVERITY_WEIGHTS["high"],
+                    "medium": SEVERITY_WEIGHTS["medium"],
+                    "low": SEVERITY_WEIGHTS["low"],
+                },
+            },
             "repositories_requested": len(results),
             "successful_scans": len([result for result in results if result.succeeded]),
             "failed_scans": len(failures),
@@ -521,6 +663,13 @@ def analysis_summary_json(
         "severity_totals": severity_totals(results),
         "scanner_coverage": scanner_coverage(results),
         "common_findings": common_findings(results),
+        "scanner_issues": [issue.to_dict() for issue in scanner_issue_rows(results)],
+        "finding_source_breakdown": dict(_aggregate_breakdown(results, "finding_source_breakdown")),
+        "directory_group_breakdown": dict(
+            _aggregate_breakdown(results, "directory_group_breakdown")
+        ),
+        "top_directories": _aggregate_top_paths(results, "top_directories"),
+        "top_files": _aggregate_top_paths(results, "top_files"),
         "failure_details": [
             {"repository": result.repository, "git_url": result.git_url, "error": result.error}
             for result in failures
@@ -534,12 +683,15 @@ def aggregate_statistics(results: Sequence[RepositoryAnalysisResult]) -> dict[st
     """Aggregate successful repository results."""
 
     successes = [result for result in results if result.succeeded]
-    health_scores = [result.health_score or 0 for result in successes]
+    scored = [result for result in successes if result.health_score is not None]
+    health_scores = [result.health_score for result in scored if result.health_score is not None]
     return {
         "average_health_score": round(sum(health_scores) / len(health_scores))
         if health_scores
         else 0,
         "median_health_score": round(median(health_scores)) if health_scores else 0,
+        "scored_repositories": len(scored),
+        "unscored_repositories": len(successes) - len(scored),
         "total_actionable_findings": sum(result.total_findings for result in successes),
         "total_critical_findings": sum(result.critical_findings for result in successes),
         "total_high_findings": sum(result.high_findings for result in successes),
@@ -652,7 +804,7 @@ def finding_summaries(findings: Sequence[Finding]) -> tuple[FindingSummary, ...]
 
 def health_grade(score: int | None) -> str:
     if score is None:
-        return "-"
+        return "N/A"
     if score >= 90:
         return "A"
     if score >= 80:
@@ -721,8 +873,14 @@ def _ranked_successes(
     results: Sequence[RepositoryAnalysisResult],
 ) -> list[RepositoryAnalysisResult]:
     return sorted(
-        (result for result in results if result.succeeded),
-        key=lambda result: result.health_score if result.health_score is not None else 101,
+        (result for result in results if result.succeeded and result.health_score is not None),
+        key=lambda result: (
+            result.health_score if result.health_score is not None else 101,
+            -result.critical_findings,
+            -result.high_findings,
+            -(result.findings_per_100_supported_files or 0),
+            result.repository,
+        ),
     )
 
 
@@ -745,8 +903,14 @@ def _csv_fieldnames() -> list[str]:
         "status",
         "scan_mode",
         "category",
+        "repository_category",
+        "category_confidence",
+        "category_evidence",
         "health_score",
         "grade",
+        "score_state",
+        "coverage_state",
+        "score_reason",
         "critical",
         "high",
         "medium",
@@ -755,8 +919,11 @@ def _csv_fieldnames() -> list[str]:
         "new_findings",
         "resolved_findings",
         "recurring_findings",
-        "files_scanned",
-        "findings_per_100_files",
+        "supported_files_scanned",
+        "affected_supported_files",
+        "affected_file_percentage",
+        "findings_per_100_supported_files",
+        "findings_per_affected_file",
         "report_path",
         "scan_path",
         "checkov_status",
@@ -770,6 +937,7 @@ def _csv_fieldnames() -> list[str]:
         "informational_findings",
         "unknown_severity_findings",
         "ignored_findings",
+        "score_formula_version",
         "clone_path",
         "error",
     ]
@@ -782,8 +950,14 @@ def _csv_row(result: RepositoryAnalysisResult, output_dir: Path) -> dict[str, in
         "status": result.status,
         "scan_mode": result.scan_mode,
         "category": result.category,
+        "repository_category": result.category,
+        "category_confidence": result.category_confidence,
+        "category_evidence": "; ".join(result.category_evidence),
         "health_score": result.health_score if result.health_score is not None else "",
         "grade": result.grade,
+        "score_state": result.score_state,
+        "coverage_state": result.coverage_state,
+        "score_reason": result.score_reason,
         "critical": result.critical_findings,
         "high": result.high_findings,
         "medium": result.medium_findings,
@@ -792,8 +966,13 @@ def _csv_row(result: RepositoryAnalysisResult, output_dir: Path) -> dict[str, in
         "new_findings": result.new_findings if result.has_baseline else "",
         "resolved_findings": result.resolved_findings if result.has_baseline else "",
         "recurring_findings": result.recurring_findings if result.has_baseline else "",
-        "files_scanned": result.supported_files,
-        "findings_per_100_files": f"{result.findings_per_100_files:.1f}",
+        "supported_files_scanned": result.density.supported_files_scanned,
+        "affected_supported_files": result.density.affected_supported_files,
+        "affected_file_percentage": _csv_number(result.density.affected_file_percentage),
+        "findings_per_100_supported_files": _csv_number(
+            result.findings_per_100_supported_files
+        ),
+        "findings_per_affected_file": _csv_number(result.density.findings_per_affected_file),
         "report_path": _relative_path_text(result.report_path, output_dir),
         "scan_path": _relative_path_text(result.scan_path, output_dir),
         "checkov_status": result.checkov_status,
@@ -807,6 +986,7 @@ def _csv_row(result: RepositoryAnalysisResult, output_dir: Path) -> dict[str, in
         "informational_findings": result.informational_findings,
         "unknown_severity_findings": result.unknown_severity_findings,
         "ignored_findings": result.ignored_findings,
+        "score_formula_version": SCORE_FORMULA_VERSION,
         "clone_path": _path_text(result.clone_path),
         "error": result.error or "",
     }
@@ -825,6 +1005,8 @@ def _leaderboard_header(include_comparison: bool) -> str:
         "Category",
         "Health",
         "Grade",
+        "Coverage",
+        "Score Status",
         "Critical",
         "High",
         "Medium",
@@ -833,7 +1015,7 @@ def _leaderboard_header(include_comparison: bool) -> str:
     ]
     if include_comparison:
         columns.extend(["New", "Resolved", "Recurring"])
-    columns.extend(["Files Scanned", "Findings per 100 Files", "Report"])
+    columns.extend(["Supported Files", "Findings per 100 supported files", "Report"])
     return "| " + " | ".join(columns) + " |"
 
 
@@ -843,6 +1025,8 @@ def _leaderboard_separator(include_comparison: bool) -> str:
         "---",
         "---",
         "---:",
+        "---",
+        "---",
         "---",
         "---:",
         "---:",
@@ -868,6 +1052,8 @@ def _leaderboard_row(
         result.category,
         result.health_score if result.health_score is not None else "-",
         result.grade,
+        _coverage_label(result.coverage_state),
+        _score_state_label(result.score_state),
         result.critical_findings,
         result.high_findings,
         result.medium_findings,
@@ -885,7 +1071,7 @@ def _leaderboard_row(
     values.extend(
         [
             result.supported_files,
-            f"{result.findings_per_100_files:.1f}",
+            _number_text(result.findings_per_100_supported_files),
             _report_link(result, output_dir),
         ]
     )
@@ -893,11 +1079,126 @@ def _leaderboard_row(
 
 
 def _empty_leaderboard_row(include_comparison: bool) -> str:
-    cells = ["-", "No repositories succeeded", "-", "-", "-", "-", "-", "-", "-", "-"]
+    cells = ["-", "No repositories scored", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"]
     if include_comparison:
         cells.extend(["-", "-", "-"])
     cells.extend(["-", "-", "-"])
     return "| " + " | ".join(cells) + " |"
+
+
+def _unscored_repositories_section(
+    results: Sequence[RepositoryAnalysisResult],
+    output_dir: Path,
+) -> list[str]:
+    if not results:
+        return []
+    lines = [
+        "",
+        "## Unscored repositories",
+        "",
+        "| Repository | Score status | Reason | Supported files | Report |",
+        "| --- | --- | --- | ---: | --- |",
+    ]
+    for result in sorted(results, key=lambda item: item.repository):
+        lines.append(
+            "| "
+            f"{_markdown_cell(result.repository)} | "
+            f"{_markdown_cell(_score_state_label(result.score_state))} | "
+            f"{_markdown_cell(result.score_reason)} | "
+            f"{result.supported_files} | {_report_link(result, output_dir)} |"
+        )
+    return lines
+
+
+def _finding_source_breakdown_section(results: Sequence[RepositoryAnalysisResult]) -> list[str]:
+    rows = _aggregate_breakdown(results, "finding_source_breakdown")
+    lines = [
+        "",
+        "## Finding source breakdown",
+        "",
+        "| Source | Critical | High | Medium | Low | Total | Affected repos | Affected files |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    if not rows:
+        lines.append("| - | 0 | 0 | 0 | 0 | 0 | 0 | 0 |")
+        return lines
+    for source, row in rows:
+        lines.append(
+            "| "
+            f"{_markdown_cell(source_label(source))} | {row['critical']} | {row['high']} | "
+            f"{row['medium']} | {row['low']} | {row['total_actionable']} | "
+            f"{row['affected_repositories']} | {row['affected_files']} |"
+        )
+    return lines
+
+
+def _directory_breakdown_section(results: Sequence[RepositoryAnalysisResult]) -> list[str]:
+    rows = _aggregate_breakdown(results, "directory_group_breakdown")
+    lines = [
+        "",
+        "## Findings by directory group",
+        "",
+        "| Directory group | Critical | High | Medium | Low | Total | Affected repos |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    if not rows:
+        lines.append("| - | 0 | 0 | 0 | 0 | 0 | 0 |")
+        return lines
+    for group, row in rows:
+        lines.append(
+            "| "
+            f"{_markdown_cell(group)} | {row['critical']} | {row['high']} | "
+            f"{row['medium']} | {row['low']} | {row['total_actionable']} | "
+            f"{row['affected_repositories']} |"
+        )
+    return lines
+
+
+def _top_paths_section(
+    results: Sequence[RepositoryAnalysisResult],
+    attribute: str,
+    heading: str,
+    label: str,
+) -> list[str]:
+    rows = _aggregate_top_paths(results, attribute)
+    if not rows:
+        return []
+    lines = [
+        "",
+        f"## {heading} by actionable findings",
+        "",
+        f"| Repository | {label} | Actionable findings |",
+        "| --- | --- | ---: |",
+    ]
+    for row in rows:
+        lines.append(
+            "| "
+            f"{_markdown_cell(row['repository'])} | {_markdown_cell(row['path'])} | "
+            f"{row['actionable_findings']} |"
+        )
+    return lines
+
+
+def _scanner_issues_section(results: Sequence[RepositoryAnalysisResult]) -> list[str]:
+    issues = scanner_issue_rows(results)
+    if not issues:
+        return []
+    lines = [
+        "",
+        "## Scanner issues",
+        "",
+        "| Repository | Scanner | Applicability | Status | Error | Score impact |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for issue in issues:
+        lines.append(
+            "| "
+            f"{_markdown_cell(issue.repository)} | {_markdown_cell(issue.scanner)} | "
+            f"{_markdown_cell(issue.applicability)} | {_markdown_cell(issue.status)} | "
+            f"{_markdown_cell(truncate(issue.error or '', 180))} | "
+            f"{_markdown_cell(issue.score_impact)} |"
+        )
+    return lines
 
 
 def _common_findings_section(results: Sequence[RepositoryAnalysisResult]) -> list[str]:
@@ -965,6 +1266,107 @@ def _report_link(result: RepositoryAnalysisResult, output_dir: Path) -> str:
     if not relative:
         return ""
     return f"[View report]({relative})"
+
+
+def _aggregate_breakdown(
+    results: Sequence[RepositoryAnalysisResult],
+    attribute: str,
+) -> list[tuple[str, dict[str, int]]]:
+    rows: dict[str, dict[str, int]] = {}
+    affected_repositories: dict[str, set[str]] = defaultdict(set)
+    for result in results:
+        if not result.succeeded:
+            continue
+        breakdown = getattr(result, attribute)
+        if not isinstance(breakdown, dict):
+            continue
+        for key, source_row in breakdown.items():
+            row = rows.setdefault(str(key), _empty_aggregate_row())
+            if not isinstance(source_row, dict):
+                continue
+            for field_name in ("critical", "high", "medium", "low", "total_actionable"):
+                value = source_row.get(field_name, 0)
+                row[field_name] += value if isinstance(value, int) else 0
+            affected_files = source_row.get("affected_files", 0)
+            row["affected_files"] += affected_files if isinstance(affected_files, int) else 0
+            if row["total_actionable"] > 0:
+                affected_repositories[str(key)].add(result.repository)
+    for key, repositories in affected_repositories.items():
+        rows[key]["affected_repositories"] = len(repositories)
+    return sorted(rows.items(), key=lambda item: item[1]["total_actionable"], reverse=True)
+
+
+def _aggregate_top_paths(
+    results: Sequence[RepositoryAnalysisResult],
+    attribute: str,
+    *,
+    limit: int = 10,
+) -> list[dict[str, int | str]]:
+    rows: list[dict[str, int | str]] = []
+    for result in results:
+        if not result.succeeded:
+            continue
+        for item in getattr(result, attribute, ()):
+            if not isinstance(item, dict):
+                continue
+            path = item.get("path")
+            count = item.get("actionable_findings")
+            if not isinstance(path, str) or not isinstance(count, int) or count <= 0:
+                continue
+            rows.append(
+                {
+                    "repository": result.repository,
+                    "path": path,
+                    "actionable_findings": count,
+                }
+            )
+    return sorted(
+        rows,
+        key=lambda row: (
+            -int(row["actionable_findings"]),
+            str(row["repository"]),
+            str(row["path"]),
+        ),
+    )[:limit]
+
+
+def _empty_aggregate_row() -> dict[str, int]:
+    return {
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "total_actionable": 0,
+        "affected_repositories": 0,
+        "affected_files": 0,
+    }
+
+
+def _coverage_label(value: str) -> str:
+    labels = {
+        "complete_coverage": "Complete",
+        "partial_coverage": "Partial",
+        "not_scored_no_supported_files": "Not scored",
+        "not_scored_all_scanners_failed": "Not scored",
+    }
+    return labels.get(value, value)
+
+
+def _score_state_label(value: str) -> str:
+    labels = {
+        "scored": "Scored",
+        "not_scored_no_supported_files": "Not scored",
+        "not_scored_all_scanners_failed": "Not scored",
+    }
+    return labels.get(value, value)
+
+
+def _csv_number(value: float | int | None) -> str:
+    return "" if value is None else f"{value:.1f}"
+
+
+def _number_text(value: float | int | None) -> str:
+    return "-" if value is None else f"{value:.1f}"
 
 
 def _scanner_status_text(scan: ScanResult, scanner: str) -> str:

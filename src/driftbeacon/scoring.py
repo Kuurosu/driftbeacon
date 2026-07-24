@@ -2,53 +2,46 @@
 
 from __future__ import annotations
 
+import math
+
 from .models import Finding, Severity
 
 ACTIONABLE_SEVERITIES: tuple[Severity, ...] = ("critical", "high", "medium", "low")
+SCORE_FORMULA_VERSION = "driftbeacon-health-v2"
+HEALTH_RISK_SCALE = 80.0
+EXTREME_ZERO_RISK = 1000.0
 
 SEVERITY_WEIGHTS: dict[Severity, float] = {
-    "critical": 30.0,
-    "high": 12.0,
-    "medium": 4.0,
-    "low": 0.25,
-    "info": 0.0,
-    "unknown": 0.0,
-}
-
-SEVERITY_CAPS: dict[Severity, float] = {
-    "critical": 70.0,
-    "high": 50.0,
-    "medium": 30.0,
-    "low": 10.0,
+    "critical": 12.0,
+    "high": 5.0,
+    "medium": 2.0,
+    "low": 1.0,
     "info": 0.0,
     "unknown": 0.0,
 }
 
 
 def calculate_health_score(findings: list[Finding]) -> int:
-    """Calculate a 0-100 score from active findings.
+    """Calculate a 0-100 score from active findings using health model v2.
 
     Only deduplicated active critical, high, medium, and low findings count by default.
     Informational and unknown-severity findings are reported for auditability but do not
     reduce health. First-scan "new" status does not affect the score.
     """
 
-    penalties_by_severity: dict[Severity, float] = {
-        "critical": 0.0,
-        "high": 0.0,
-        "medium": 0.0,
-        "low": 0.0,
-        "info": 0.0,
-        "unknown": 0.0,
-    }
-    for finding in actionable_active_findings(findings):
-        penalties_by_severity[finding.severity] += SEVERITY_WEIGHTS[finding.severity]
+    weighted = weighted_risk(findings)
+    score = round(100 * math.exp(-weighted / HEALTH_RISK_SCALE))
+    if 0 < weighted < EXTREME_ZERO_RISK and score == 0:
+        return 1
+    return max(0, min(100, score))
 
-    penalty = sum(
-        min(penalties_by_severity[severity], SEVERITY_CAPS[severity])
-        for severity in ACTIONABLE_SEVERITIES
+
+def weighted_risk(findings: list[Finding]) -> float:
+    """Return weighted actionable risk before health-score decay."""
+
+    return sum(
+        SEVERITY_WEIGHTS[finding.severity] for finding in actionable_active_findings(findings)
     )
-    return max(0, min(100, round(100 - min(penalty, 100))))
 
 
 def actionable_active_findings(findings: list[Finding]) -> list[Finding]:
@@ -57,7 +50,7 @@ def actionable_active_findings(findings: list[Finding]) -> list[Finding]:
     return [
         finding
         for finding in actionable_findings(findings)
-        if finding.status != "resolved"
+        if finding.status != "resolved" and not finding.excluded_from_score
     ]
 
 
@@ -67,7 +60,7 @@ def actionable_findings(findings: list[Finding]) -> list[Finding]:
     return [
         finding
         for finding in deduplicate_findings_by_fingerprint(findings)
-        if finding.severity in ACTIONABLE_SEVERITIES
+        if finding.severity in ACTIONABLE_SEVERITIES and not finding.excluded_from_score
     ]
 
 

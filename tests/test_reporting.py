@@ -25,3 +25,22 @@ def test_report_generation_includes_summary_and_scanner_failure(
     assert "Trivy: Partial" in report
     assert "super-secret" not in report
     assert "<redacted>" in report
+
+
+def test_report_generation_includes_top_directories_and_files(
+    current_scan: ScanResult,
+    previous_scan: ScanResult,
+) -> None:
+    current_scan.summary["top_directories"] = [
+        {"path": "terraform/production", "actionable_findings": 3}
+    ]
+    current_scan.summary["top_files"] = [
+        {"path": "terraform/production/main.tf", "actionable_findings": 2}
+    ]
+
+    report = generate_report(current_scan, compare_scans(current_scan, previous_scan))
+
+    assert "## Top directories by actionable findings" in report
+    assert "| terraform/production | 3 |" in report
+    assert "## Top files by actionable findings" in report
+    assert "| terraform/production/main.tf | 2 |" in report

@@ -244,6 +244,7 @@ def _run_repository_analysis(git_urls: Sequence[str], args: argparse.Namespace) 
             keep=bool(args.keep),
             scanner_timeout_seconds=int(args.timeout),
             clone_timeout_seconds=int(args.clone_timeout),
+            exclude_path_groups=tuple(getattr(args, "exclude_path_group", []) or ()),
         ),
     )
     print(f"Saved analysis summary CSV to {result.csv_path}")
@@ -328,6 +329,22 @@ def _add_analysis_args(parser: argparse.ArgumentParser, *, default_workers: int)
         type=int,
         default=300,
         help="Git clone timeout in seconds per repository.",
+    )
+    parser.add_argument(
+        "--exclude-path-group",
+        action="append",
+        choices=[
+            "examples",
+            "tests",
+            "fixtures",
+            "generated",
+            "vendor",
+            "third_party",
+            "docs",
+            "charts",
+        ],
+        default=[],
+        help="Exclude a directory group from health scoring while preserving audit counts.",
     )
 
 

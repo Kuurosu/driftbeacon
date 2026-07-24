@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from driftbeacon.comparison import compare_scans
 from driftbeacon.models import ComparisonSummary, Finding, ScanResult
+from driftbeacon.scoring import SCORE_FORMULA_VERSION
 
 
 def test_first_run_marks_all_current_findings_new(current_scan: ScanResult) -> None:
@@ -17,6 +18,7 @@ def test_compare_detects_new_recurring_resolved_and_severity_changes(
     current_scan: ScanResult,
     previous_scan: ScanResult,
 ) -> None:
+    previous_scan.summary["score_formula_version"] = SCORE_FORMULA_VERSION
     comparison = compare_scans(current_scan, previous_scan)
 
     assert comparison.has_baseline is True
@@ -40,6 +42,19 @@ def test_compare_detects_new_recurring_resolved_and_severity_changes(
     ]
     assert comparison.health_score_change is not None
     assert comparison.active_findings_change == 1
+
+
+def test_compare_warns_when_score_formula_version_changes(
+    current_scan: ScanResult,
+    previous_scan: ScanResult,
+) -> None:
+    previous_scan.summary["score_formula_version"] = "driftbeacon-health-v1"
+
+    comparison = compare_scans(current_scan, previous_scan)
+
+    assert comparison.score_formula_changed is True
+    assert comparison.health_score_change is None
+    assert comparison.to_dict()["score_formula_version"] == SCORE_FORMULA_VERSION
 
 
 def test_comparison_summary_counts_only_actionable_severities() -> None:

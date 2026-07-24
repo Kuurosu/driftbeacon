@@ -90,6 +90,12 @@ class Finding:
     fingerprint: str
     remediation: str | None = None
     documentation_url: str | None = None
+    finding_family: str | None = None
+    package_name: str | None = None
+    installed_version: str | None = None
+    directory_group: str | None = None
+    excluded_from_score: bool = False
+    score_exclusion_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -109,6 +115,12 @@ class Finding:
             "fingerprint": self.fingerprint,
             "remediation": self.remediation,
             "documentation_url": self.documentation_url,
+            "finding_family": self.finding_family,
+            "package_name": self.package_name,
+            "installed_version": self.installed_version,
+            "directory_group": self.directory_group,
+            "excluded_from_score": self.excluded_from_score,
+            "score_exclusion_reason": self.score_exclusion_reason,
         }
 
     @classmethod
@@ -141,6 +153,22 @@ class Finding:
                 if isinstance(data.get("documentation_url"), str)
                 else None
             ),
+            finding_family=data.get("finding_family")
+            if isinstance(data.get("finding_family"), str)
+            else None,
+            package_name=data.get("package_name")
+            if isinstance(data.get("package_name"), str)
+            else None,
+            installed_version=data.get("installed_version")
+            if isinstance(data.get("installed_version"), str)
+            else None,
+            directory_group=data.get("directory_group")
+            if isinstance(data.get("directory_group"), str)
+            else None,
+            excluded_from_score=bool(data.get("excluded_from_score", False)),
+            score_exclusion_reason=data.get("score_exclusion_reason")
+            if isinstance(data.get("score_exclusion_reason"), str)
+            else None,
         )
 
 
@@ -185,8 +213,8 @@ class ScanResult:
     completed_at: datetime
     scanner_statuses: dict[str, ScannerStatus]
     findings: list[Finding]
-    health_score: int
-    summary: dict[str, int | str] = field(default_factory=dict)
+    health_score: int | None
+    summary: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -228,7 +256,9 @@ class ScanResult:
             completed_at=completed_at,
             scanner_statuses=statuses,
             findings=findings,
-            health_score=int(data.get("health_score", 100)),
+            health_score=(
+                int(data["health_score"]) if isinstance(data.get("health_score"), int) else None
+            ),
             summary=summary if isinstance(summary, dict) else {},
         )
 
@@ -244,6 +274,9 @@ class ComparisonSummary:
     severity_changes: list[dict[str, str]]
     health_score_change: int | None
     active_findings_change: int | None
+    score_formula_version: str | None = None
+    previous_score_formula_version: str | None = None
+    score_formula_changed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -254,6 +287,9 @@ class ComparisonSummary:
             "severity_changes": self.severity_changes,
             "health_score_change": self.health_score_change,
             "active_findings_change": self.active_findings_change,
+            "score_formula_version": self.score_formula_version,
+            "previous_score_formula_version": self.previous_score_formula_version,
+            "score_formula_changed": self.score_formula_changed,
             "counts": {
                 "new": actionable_count(self.new_findings),
                 "recurring": actionable_count(self.recurring_findings),

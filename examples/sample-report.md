@@ -3,20 +3,22 @@
 ## At a glance
 **Repository:** Kuurosu/driftbeacon
 **Branch:** main
-**Commit:** `cf1f0a417989`
-**Health score:** 4/100 (down 67 points)
+**Commit:** `72199925ac51`
+**Health score:** 61/100 (health model changed)
+**Coverage:** Complete
+**Score status:** Scored
 **Active findings:** 6
-**Trend:** 4 new findings, 2 recurring findings, 1 resolved finding, health score down 67 points
+**Trend:** 4 new findings, 2 recurring findings, 1 resolved finding, health model changed
 
 ## What happened
-Scanner status: 2 successful scanners. DriftBeacon normalized 6 active findings. Health is 4/100.
+Scanner status: 2 successful scanners. DriftBeacon normalized 6 active findings. Health is 61/100.
 
 ## What changed
 - 4 new findings
 - 2 recurring findings
 - 1 resolved finding
 - 1 severity change
-- Health score down 67 points
+- Health model changed; score movement is not directly comparable.
 
 ## Fix these first
 ### 1. AWS Access Key ID
@@ -48,9 +50,47 @@ Scanner status: 2 successful scanners. DriftBeacon normalized 6 active findings.
 - Passed checks: 0
 - Duplicate findings removed: 0
 - Scanner errors: 0
+- Score reason: Score calculated from configured scanner output.
+- Score formula version: driftbeacon-health-v2
+
+## Finding source breakdown
+
+| Source | Critical | High | Medium | Low | Total |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Checkov configuration | 0 | 2 | 0 | 1 | 3 |
+| Trivy vulnerabilities | 0 | 1 | 0 | 0 | 1 |
+| Trivy misconfigurations | 1 | 0 | 0 | 0 | 1 |
+| Trivy secrets | 1 | 0 | 0 | 0 | 1 |
+
+## Findings by directory group
+
+| Directory group | Critical | High | Medium | Low | Total |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Production | 2 | 3 | 0 | 1 | 6 |
+
+## Top directories by actionable findings
+
+| Directory | Actionable findings |
+| --- | ---: |
+| terraform/production | 3 |
+| terraform/dev | 1 |
+| . | 1 |
+| k8s/production | 1 |
+
+## Top files by actionable findings
+
+| File | Actionable findings |
+| --- | ---: |
+| terraform/production/iam.tf | 1 |
+| terraform/production/s3.tf | 1 |
+| terraform/dev/s3.tf | 1 |
+| requirements.txt | 1 |
+| k8s/production/deployment.yaml | 1 |
+| terraform/production/secrets.tf | 1 |
 
 ## Scoring model
-Health starts at 100 and subtracts capped penalties for deduplicated active critical, high, medium, and low findings. Informational findings, unknown-severity findings, passed checks, scanner metadata, and first-scan baseline status do not reduce the score.
+Formula driftbeacon-health-v2: health = round(100 * exp(-weighted_risk / 80.0)). Default weights are critical=12.0, high=5.0, medium=2.0, low=1.0. Informational findings, unknown-severity findings, passed checks, skipped scanners, scanner-error records, duplicates, and first-scan baseline status do not reduce the score.
+The previous baseline used a different or unknown health formula, so raw health movement is not directly comparable.
 
 ## Recently resolved
 - High: Security group allows unrestricted SSH (terraform/production/security-group.tf:42)

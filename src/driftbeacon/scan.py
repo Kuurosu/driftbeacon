@@ -6,12 +6,21 @@ import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+from .analysis_metrics import (
+    directory_group_breakdown,
+    enrich_findings_for_analysis,
+    excluded_finding_counts,
+    finding_source_breakdown,
+    top_paths_by_findings,
+)
 from .comparison import compare_scans
 from .config import Config
 from .models import Finding, ScannerStatus, ScanResult
 from .scanners import CheckovScanner, ScannerExecution, TrivyScanner
 from .scoring import (
+    SCORE_FORMULA_VERSION,
     actionable_active_findings,
     calculate_health_score,
     deduplicate_findings_by_fingerprint,
@@ -67,6 +76,7 @@ def run_scan(
     for finding in findings:
         finding.first_seen = finding.first_seen or started_at
         finding.last_seen = completed_at
+    enrich_findings_for_analysis(findings)
     repository, branch, commit_sha = detect_repository_metadata(config.repository_path)
     scanner_statuses = {execution.scanner: execution.status for execution in executions}
     scan = ScanResult(
@@ -88,7 +98,7 @@ def run_scan(
 def build_scan_summary(
     findings: list[Finding],
     executions: list[ScannerExecution],
-) -> dict[str, int | str]:
+) -> dict[str, Any]:
     """Build audit counts for a scan result."""
 
     actionable = actionable_active_findings(findings)
@@ -119,6 +129,15 @@ def build_scan_summary(
         "recurring_findings": 0,
         "resolved_findings": 0,
         "severity_changes": 0,
+        "score_formula_version": SCORE_FORMULA_VERSION,
+        "score_state": "scored",
+        "coverage_state": "complete_coverage",
+        "score_reason": "Score calculated from configured scanner output.",
+        "finding_source_breakdown": finding_source_breakdown(findings),
+        "directory_group_breakdown": directory_group_breakdown(findings),
+        "excluded_finding_counts": excluded_finding_counts(findings),
+        "top_directories": top_paths_by_findings(findings, by_file=False),
+        "top_files": top_paths_by_findings(findings, by_file=True),
     }
 
 

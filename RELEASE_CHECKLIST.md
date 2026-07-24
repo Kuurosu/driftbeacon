@@ -4,14 +4,14 @@ Status date: 2026-07-24
 
 ## Validation
 
-- [x] `python -m pytest` passed: 46 tests.
+- [x] `python -m pytest` passed: 63 tests.
 - [x] `ruff check .` passed.
-- [x] `mypy src` passed: 19 source files.
+- [x] `mypy src` passed: 20 source files.
 - [x] `make run-sample` passed and generated `.driftbeacon-sample/report.md`.
 - [x] `driftbeacon --help` passed from the installed local CLI.
 - [x] `driftbeacon analyse-repo` validated against a local Git repository clone.
 - [x] `driftbeacon analyse` validated with one successful local Git repository and one failed repository.
-- [x] Repository Analysis Mode smoke-tested against three public GitHub repositories with Checkov and Trivy succeeding.
+- [x] Repository Analysis Mode smoke-tested against five public GitHub repositories with scanner issue attribution verified.
 - [x] Checkov validated against `examples/demo-infrastructure/`: 52 failed checks captured.
 - [x] Trivy validated against `examples/demo-infrastructure/`: 41 misconfigurations captured.
 - [x] Historical comparison validated with new, recurring, resolved, and health score delta states.

@@ -3,20 +3,22 @@
 ## At a glance
 **Repository:** Kuurosu/driftbeacon
 **Branch:** main
-**Commit:** `cf1f0a417989`
-**Health score:** 0/100 (down 72 points)
+**Commit:** `72199925ac51`
+**Health score:** 20/100 (down 66 points)
+**Coverage:** Complete
+**Score status:** Scored
 **Active findings:** 41
-**Trend:** 39 new findings, 2 recurring findings, 1 resolved finding, health score down 72 points
+**Trend:** 39 new findings, 2 recurring findings, 1 resolved finding, health score down 66 points
 
 ## What happened
-Scanner status: 2 successful scanners. DriftBeacon normalized 41 active findings. Health is 0/100.
+Scanner status: 2 successful scanners. DriftBeacon normalized 41 active findings. Health is 20/100.
 
 ## What changed
 - 39 new findings
 - 2 recurring findings
 - 1 resolved finding
 - 0 severity changes
-- Health score down 72 points
+- Health score down 66 points
 
 ## Fix these first
 ### 1. A security group rule should not allow unrestricted egress to any IP address.
@@ -48,9 +50,41 @@ Scanner status: 2 successful scanners. DriftBeacon normalized 41 active findings
 - Passed checks: 109
 - Duplicate findings removed: 0
 - Scanner errors: 0
+- Score reason: Score calculated from configured scanner output.
+- Score formula version: driftbeacon-health-v2
+
+## Finding source breakdown
+
+| Source | Critical | High | Medium | Low | Total |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Trivy misconfigurations | 2 | 15 | 7 | 17 | 41 |
+
+## Findings by directory group
+
+| Directory group | Critical | High | Medium | Low | Total |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Production | 2 | 15 | 7 | 17 | 41 |
+
+## Top directories by actionable findings
+
+| Directory | Actionable findings |
+| --- | ---: |
+| kubernetes | 21 |
+| terraform | 12 |
+| cloudformation | 4 |
+| docker | 4 |
+
+## Top files by actionable findings
+
+| File | Actionable findings |
+| --- | ---: |
+| kubernetes/privileged-pod.yaml | 21 |
+| terraform/main.tf | 12 |
+| cloudformation/insecure-security-group.yml | 4 |
+| docker/Dockerfile | 4 |
 
 ## Scoring model
-Health starts at 100 and subtracts capped penalties for deduplicated active critical, high, medium, and low findings. Informational findings, unknown-severity findings, passed checks, scanner metadata, and first-scan baseline status do not reduce the score.
+Formula driftbeacon-health-v2: health = round(100 * exp(-weighted_risk / 80.0)). Default weights are critical=12.0, high=5.0, medium=2.0, low=1.0. Informational findings, unknown-severity findings, passed checks, skipped scanners, scanner-error records, duplicates, and first-scan baseline status do not reduce the score.
 
 ## Recently resolved
 - High: Security group allowed unrestricted SSH (terraform/legacy-security-group.tf:42)

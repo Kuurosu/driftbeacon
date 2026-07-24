@@ -6,7 +6,12 @@ from copy import deepcopy
 from datetime import datetime
 
 from .models import ComparisonSummary, Finding, ScanResult, active_findings
-from .scoring import actionable_active_findings, actionable_findings, calculate_health_score
+from .scoring import (
+    SCORE_FORMULA_VERSION,
+    actionable_active_findings,
+    actionable_findings,
+    calculate_health_score,
+)
 
 
 def compare_scans(current: ScanResult, previous: ScanResult | None) -> ComparisonSummary:
@@ -21,8 +26,21 @@ def compare_scans(current: ScanResult, previous: ScanResult | None) -> Compariso
     )
     current.health_score = calculate_health_score(current.findings)
 
-    if previous is not None:
-        comparison.health_score_change = current.health_score - previous.health_score
+    current_formula = str(current.summary.get("score_formula_version", SCORE_FORMULA_VERSION))
+    previous_formula = (
+        str(previous.summary.get("score_formula_version", "unknown"))
+        if previous is not None
+        else None
+    )
+    comparison.score_formula_version = current_formula
+    comparison.previous_score_formula_version = previous_formula
+    comparison.score_formula_changed = bool(
+        previous is not None and previous_formula != current_formula
+    )
+
+    if previous is not None and not comparison.score_formula_changed:
+        if current.health_score is not None and previous.health_score is not None:
+            comparison.health_score_change = current.health_score - previous.health_score
         comparison.active_findings_change = len(
             actionable_active_findings(current.findings)
         ) - len(actionable_active_findings(previous_findings))
@@ -36,6 +54,9 @@ def compare_scans(current: ScanResult, previous: ScanResult | None) -> Compariso
         "resolved_findings": len(actionable_findings(comparison.resolved_findings)),
         "severity_changes": len(comparison.severity_changes),
         "baseline_status": "comparison_scan" if comparison.has_baseline else "initial_baseline",
+        "score_formula_version": current_formula,
+        "previous_score_formula_version": previous_formula or "",
+        "score_formula_changed": "true" if comparison.score_formula_changed else "false",
     }
     return comparison
 

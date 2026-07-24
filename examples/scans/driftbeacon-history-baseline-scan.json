@@ -1,22 +1,28 @@
 {
   "branch": "main",
-  "commit_sha": "cf1f0a417989a3ab980b0fed200114af972902a5",
-  "completed_at": "2026-07-24T10:32:48.591449+00:00",
+  "commit_sha": "72199925ac518c0d8a82f6effda0b749217124f1",
+  "completed_at": "2026-07-24T11:22:46.817473+00:00",
   "findings": [
     {
       "category": "network",
       "description": "Security groups provide stateful filtering of ingress and egress network traffic to AWS\nresources. It is recommended that no security group allows unrestricted ingress access to\nremote server administration ports, such as SSH to port 22 and RDP to port 3389.",
+      "directory_group": "production",
       "documentation_url": "https://avd.aquasec.com/misconfig/aws-0107",
+      "excluded_from_score": false,
       "file_path": "cloudformation/insecure-security-group.yml",
+      "finding_family": "trivy_misconfiguration",
       "fingerprint": "b710ea7112f0a6872f62",
-      "first_seen": "2026-07-24T10:32:48.563643+00:00",
+      "first_seen": "2026-07-24T11:22:46.790744+00:00",
       "id": "trivy-b710ea7112f0a6872f62",
-      "last_seen": "2026-07-24T10:32:48.591449+00:00",
+      "installed_version": null,
+      "last_seen": "2026-07-24T11:22:46.817473+00:00",
       "line_start": 27,
+      "package_name": null,
       "remediation": "Set a more restrictive CIDR range",
       "resource": null,
       "rule_id": "AWS-0107",
       "scanner": "trivy",
+      "score_exclusion_reason": null,
       "severity": "high",
       "status": "new",
       "title": "Security groups should not allow unrestricted ingress to SSH or RDP from any IP address."
@@ -24,17 +30,23 @@
     {
       "category": "container",
       "description": "When using a 'FROM' statement you should use a specific tag to avoid uncontrolled behavior when the image is updated.",
+      "directory_group": "production",
       "documentation_url": "https://avd.aquasec.com/misconfig/ds-0001",
+      "excluded_from_score": false,
       "file_path": "docker/Dockerfile",
+      "finding_family": "trivy_misconfiguration",
       "fingerprint": "cf69a08060060de19803",
-      "first_seen": "2026-07-24T10:32:48.563643+00:00",
+      "first_seen": "2026-07-24T11:22:46.790744+00:00",
       "id": "trivy-cf69a08060060de19803",
-      "last_seen": "2026-07-24T10:32:48.591449+00:00",
+      "installed_version": null,
+      "last_seen": "2026-07-24T11:22:46.817473+00:00",
       "line_start": 1,
+      "package_name": null,
       "remediation": "Add a tag to the image in the 'FROM' statement",
       "resource": null,
       "rule_id": "DS-0001",
       "scanner": "trivy",
+      "score_exclusion_reason": null,
       "severity": "medium",
       "status": "new",
       "title": "':latest' tag used"
@@ -42,23 +54,29 @@
     {
       "category": "network",
       "description": "Previous baseline included SSH open to the internet.",
+      "directory_group": "production",
       "documentation_url": null,
+      "excluded_from_score": false,
       "file_path": "terraform/legacy-security-group.tf",
+      "finding_family": "checkov_configuration",
       "fingerprint": "synthetic-resolved-unrestricted-ssh",
-      "first_seen": "2026-07-24T10:32:48.563643+00:00",
+      "first_seen": "2026-07-24T11:22:46.790744+00:00",
       "id": "synthetic-resolved-unrestricted-ssh",
-      "last_seen": "2026-07-24T10:32:48.591449+00:00",
+      "installed_version": null,
+      "last_seen": "2026-07-24T11:22:46.817473+00:00",
       "line_start": 42,
+      "package_name": null,
       "remediation": "Restrict SSH ingress to trusted administration ranges.",
       "resource": "aws_security_group.legacy_ssh",
       "rule_id": "CKV_AWS_24",
       "scanner": "checkov",
+      "score_exclusion_reason": null,
       "severity": "high",
       "status": "new",
       "title": "Security group allowed unrestricted SSH"
     }
   ],
-  "health_score": 72,
+  "health_score": 86,
   "repository": "demo-infrastructure",
   "scanner_statuses": {
     "checkov": {
@@ -74,13 +92,46 @@
       "status": "success"
     }
   },
-  "started_at": "2026-07-24T10:32:48.563643+00:00",
+  "started_at": "2026-07-24T11:22:46.790744+00:00",
   "summary": {
     "actionable_findings": 3,
     "active_findings": 3,
+    "coverage_state": "complete_coverage",
     "deduplicated_active_findings": 3,
     "deduplicated_findings": 3,
+    "directory_group_breakdown": {
+      "production": {
+        "affected_files": 0,
+        "affected_repositories": 0,
+        "critical": 0,
+        "high": 2,
+        "low": 0,
+        "medium": 1,
+        "total_actionable": 3
+      }
+    },
     "duplicate_findings_removed": 0,
+    "excluded_finding_counts": {},
+    "finding_source_breakdown": {
+      "checkov_configuration": {
+        "affected_files": 1,
+        "affected_repositories": 0,
+        "critical": 0,
+        "high": 1,
+        "low": 0,
+        "medium": 0,
+        "total_actionable": 1
+      },
+      "trivy_misconfiguration": {
+        "affected_files": 2,
+        "affected_repositories": 0,
+        "critical": 0,
+        "high": 1,
+        "low": 0,
+        "medium": 1,
+        "total_actionable": 2
+      }
+    },
     "ignored_findings": 0,
     "informational_findings": 0,
     "new_findings": 0,
@@ -90,8 +141,39 @@
     "recurring_findings": 0,
     "resolved_findings": 0,
     "scanner_errors": 0,
+    "score_formula_version": "driftbeacon-health-v2",
+    "score_reason": "Score calculated from configured scanner output.",
+    "score_state": "scored",
     "severity_changes": 0,
     "skipped_scanners": 0,
+    "top_directories": [
+      {
+        "actionable_findings": 1,
+        "path": "cloudformation"
+      },
+      {
+        "actionable_findings": 1,
+        "path": "docker"
+      },
+      {
+        "actionable_findings": 1,
+        "path": "terraform"
+      }
+    ],
+    "top_files": [
+      {
+        "actionable_findings": 1,
+        "path": "cloudformation/insecure-security-group.yml"
+      },
+      {
+        "actionable_findings": 1,
+        "path": "docker/Dockerfile"
+      },
+      {
+        "actionable_findings": 1,
+        "path": "terraform/legacy-security-group.tf"
+      }
+    ],
     "unknown_severity_findings": 0
   }
 }

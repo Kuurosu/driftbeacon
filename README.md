@@ -141,6 +141,14 @@ EOF
 driftbeacon analyse repos.txt --workers 4
 ```
 
+Repository analysis can exclude noisy directory groups from health scoring while preserving audit counts:
+
+```sh
+driftbeacon analyse repos.txt \
+  --exclude-path-group examples \
+  --exclude-path-group fixtures
+```
+
 Repository analysis mode:
 
 - Clones each repository into a temporary directory.
@@ -149,7 +157,7 @@ Repository analysis mode:
 - Writes per-repository `current-scan.json`, `comparison-summary.json`, and `report.md`.
 - Writes `analysis-summary.csv`, `analysis-summary.md`, and `analysis-summary.json`.
 - Prints progress such as `[12/50] Scanning terraform-aws-vpc...`.
-- Prints a one-line result per repository with health score and severity counts.
+- Prints a one-line result per repository with health score or an explicit not-scored reason.
 - Continues when one repository fails.
 - Deletes temporary clones unless `--keep` is passed.
 - Uses `owner--repo` output directories so repositories with the same name do not collide.
@@ -168,18 +176,25 @@ By default, analysis output is written to `.driftbeacon-analysis/`:
     report.md
 ```
 
-The first analysis run is an initial baseline, so the summary shows `Total Findings` rather than treating everything as newly introduced. Later runs against the same output directory show `New`, `Resolved`, and `Recurring` columns. The Markdown summary is ranked by lowest health score first and uses relative report links. The CSV contains one row per repository, including failed repositories and their error message. The JSON summary has stable top-level fields:
+The first analysis run is an initial baseline, so the summary shows `Total Findings` rather than treating everything as newly introduced. Later runs against the same output directory show `New`, `Resolved`, and `Recurring` columns. The Markdown summary ranks only repositories with valid scores, labels partial coverage, and keeps unscored repositories in a separate section. The CSV contains one row per repository, including failed repositories and their error message. The JSON summary schema is version `2.0` and has stable top-level fields:
 
 - `metadata`
 - `aggregate_statistics`
 - `severity_totals`
 - `scanner_coverage`
+- `scanner_issues`
+- `finding_source_breakdown`
+- `directory_group_breakdown`
+- `top_directories`
+- `top_files`
 - `common_findings`
 - `failure_details`
 - `raw_vs_deduplicated_counts`
 - `repository_results`
 
-Repository analysis is useful for research and triage, but compare repositories carefully. The summary includes repository category, supported file count, and findings per 100 supported files because a large Terraform provider, a small module, and a guide repository are not directly comparable by raw finding count.
+Each repository row includes `health_score`, `grade`, `score_state`, `coverage_state`, `score_reason`, `supported_files_scanned`, `affected_supported_files`, `affected_file_percentage`, `findings_per_100_supported_files`, `findings_per_affected_file`, `repository_category`, `category_confidence`, `category_evidence`, `scanner_results`, `finding_source_breakdown`, `directory_group_breakdown`, `excluded_finding_counts`, and `score_formula_version`.
+
+Repository analysis is useful for research and triage, but compare repositories carefully. The summary includes repository category, supported file count, affected file count, and findings per 100 supported files because a large Terraform provider, a small module, and a guide repository are not directly comparable by raw finding count. Findings per 100 supported files is a density, not a percentage, and can exceed 100 when one file has multiple findings.
 
 ## GitHub Installation
 
@@ -291,24 +306,27 @@ Nothing under `examples/demo-infrastructure/` should be deployed. The Terraform 
 
 ## Health Score
 
-Health starts at `100`. DriftBeacon subtracts penalties for deduplicated active actionable findings only:
-
-- Critical: `30` each, capped at `70`
-- High: `12` each, capped at `50`
-- Medium: `4` each, capped at `30`
-- Low: `0.25` each, capped at `10`
-
-The final score is:
+DriftBeacon health formula version `driftbeacon-health-v2` uses weighted risk and exponential decay:
 
 ```text
-max(0, round(100 - min(sum(capped severity penalties), 100)))
+weighted_risk =
+    critical_count * 12
+  + high_count * 5
+  + medium_count * 2
+  + low_count * 1
+
+health = round(100 * exp(-weighted_risk / 80))
 ```
 
-Informational findings, unknown-severity findings, passed checks, scanner metadata, resolved findings, and exact duplicate fingerprints do not reduce the score. First-scan baseline status does not affect the score; a finding is not penalized just because there is no previous scan yet.
+The curve is continuous and monotonic: more actionable findings never improve health. DriftBeacon reserves exact `0` for extreme weighted risk (`weighted_risk >= 1000`); serious but non-extreme repositories can still rank above one another.
+
+Informational findings, unknown-severity findings, passed checks, skipped scanners, scanner-error records, resolved findings, and exact duplicate fingerprints do not reduce the score. First-scan baseline status does not affect the score; a finding is not penalized just because there is no previous scan yet.
+
+A repository is scored only when DriftBeacon has meaningful coverage. Zero supported files is `not_scored_no_supported_files`, not healthy. If all applicable scanners fail, the repository is `not_scored_all_scanners_failed`. If one applicable scanner succeeds and another fails, the repository is scored with `partial_coverage` and the report warns that the score may be incomplete.
 
 Checkov community JSON does not always include native severity. When severity is missing or unrecognized, DriftBeacon records the finding as `unknown` for audit visibility and ignores it in health scoring by default rather than silently promoting it to high risk.
 
-The report trend compares the current score with the previous scan score.
+The report trend compares the current score with the previous scan score only when both scans used the same score formula version. If the formula changed, DriftBeacon still compares finding identity but does not present raw score movement as directly comparable.
 
 ## Prioritisation
 

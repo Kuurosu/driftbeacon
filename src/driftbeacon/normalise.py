@@ -127,6 +127,7 @@ def normalise_checkov_with_diagnostics(
                 fingerprint=fingerprint,
                 remediation=remediation,
                 documentation_url=documentation_url,
+                finding_family="checkov_configuration",
             )
         )
     unique = _deduplicate_findings(findings)
@@ -277,6 +278,7 @@ def _trivy_vulnerabilities(result: dict[str, Any], target: str | None) -> list[F
             continue
         rule_id = _string(item.get("VulnerabilityID") or "TRIVY_VULNERABILITY_UNKNOWN")
         package = _optional_string(item.get("PkgName"))
+        installed_version = _optional_string(item.get("InstalledVersion"))
         title = redact_secrets(_string(item.get("Title") or f"{rule_id} in {package or 'package'}"))
         description = redact_secrets(_string(item.get("Description") or title))
         fixed_version = _optional_string(item.get("FixedVersion"))
@@ -304,6 +306,9 @@ def _trivy_vulnerabilities(result: dict[str, Any], target: str | None) -> list[F
                 fingerprint=fingerprint,
                 remediation=remediation,
                 documentation_url=_optional_string(item.get("PrimaryURL")),
+                finding_family="trivy_vulnerability",
+                package_name=package,
+                installed_version=installed_version,
             )
         )
     return findings
@@ -355,6 +360,7 @@ def _trivy_misconfigurations(
                 fingerprint=fingerprint,
                 remediation=redact_secrets(_optional_string(item.get("Resolution"))),
                 documentation_url=_optional_string(item.get("PrimaryURL")),
+                finding_family="trivy_misconfiguration",
             )
         )
     return findings
@@ -398,6 +404,7 @@ def _trivy_secrets(result: dict[str, Any], target: str | None) -> list[Finding]:
                 fingerprint=fingerprint,
                 remediation="Remove the hardcoded secret and rotate it if it was committed.",
                 documentation_url=None,
+                finding_family="trivy_secret",
             )
         )
     return findings

@@ -19,6 +19,7 @@ from driftbeacon.analysis import (
     repository_name_from_url,
     write_analysis_summaries,
 )
+from driftbeacon.analysis_metrics import DensityMetrics
 
 
 def _result(
@@ -38,8 +39,21 @@ def _result(
     category: str = "Terraform module",
     supported_files: int = 2,
     error: str | None = None,
+    score_state: str = "scored",
+    coverage_state: str = "complete_coverage",
+    score_reason: str = "All applicable scanners succeeded or were not applicable.",
+    density: DensityMetrics | None = None,
+    top_directories: tuple[dict[str, int | str], ...] = (),
+    top_files: tuple[dict[str, int | str], ...] = (),
 ) -> RepositoryAnalysisResult:
     output_dir = Path(".driftbeacon-analysis") / repository
+    density = density or DensityMetrics(
+        supported_files,
+        0,
+        0.0 if supported_files else None,
+        0.0 if supported_files else None,
+        None,
+    )
     return RepositoryAnalysisResult(
         index=index,
         git_url=f"https://github.com/example/{repository}.git",
@@ -59,6 +73,9 @@ def _result(
         clone_path=None,
         error=error,
         category=category,
+        score_state=score_state,
+        coverage_state=coverage_state,
+        score_reason=score_reason,
         total_findings=critical + high + medium + low,
         resolved_findings=resolved,
         recurring_findings=recurring,
@@ -71,6 +88,9 @@ def _result(
         scanner_errors=0,
         checkov_status="success",
         trivy_status="skipped",
+        density=density,
+        top_directories=top_directories,
+        top_files=top_files,
     )
 
 
@@ -92,6 +112,12 @@ def test_repository_name_from_url_handles_common_git_shapes() -> None:
         "terraform-aws-vpc"
     )
     assert repository_name_from_url("git@github.com:org/platform-infra.git") == "platform-infra"
+
+
+def test_legacy_category_helper_uses_evidence_based_classifier() -> None:
+    assert analysis.detect_repository_category("gruntwork-io/terragrunt", []) == (
+        "Terraform tooling"
+    )
 
 
 def test_detect_supported_infrastructure_files_skips_generated_dirs(tmp_path: Path) -> None:
@@ -131,9 +157,67 @@ def test_write_analysis_summaries_writes_csv_markdown_and_json(tmp_path: Path) -
     assert "Failed repositories" in markdown
     assert "git clone failed" in markdown
     data = json.loads(json_path.read_text(encoding="utf-8"))
-    assert data["schema_version"] == "1.0"
+    assert data["schema_version"] == "2.0"
+    assert data["metadata"]["score_formula_version"] == "driftbeacon-health-v2"
     assert data["metadata"]["repositories_requested"] == 3
+    assert "scanner_issues" in data
     assert data["repository_results"][0]["audit"]["passed_checks"] == 2
+
+
+def test_summary_ranking_excludes_unscored_and_uses_tiebreakers(tmp_path: Path) -> None:
+    alpha = _result(
+        index=1,
+        repository="alpha",
+        health_score=60,
+        high=4,
+        density=DensityMetrics(10, 2, 20.0, 40.0, 2.0),
+    )
+    beta = _result(
+        index=2,
+        repository="beta",
+        health_score=60,
+        critical=1,
+        density=DensityMetrics(10, 1, 10.0, 10.0, 1.0),
+    )
+    unscored = _result(
+        index=3,
+        repository="unscored",
+        health_score=None,
+        supported_files=0,
+        score_state="not_scored_no_supported_files",
+        coverage_state="not_scored_no_supported_files",
+        score_reason="No supported files detected.",
+    )
+
+    markdown = analysis_summary_markdown([alpha, beta, unscored], tmp_path)
+
+    assert "Average health score: 60" in markdown
+    assert markdown.index("| 1 | beta |") < markdown.index("| 2 | alpha |")
+    assert "| 3 | unscored |" not in markdown
+    assert "## Unscored repositories" in markdown
+    assert "| unscored | Not scored | No supported files detected. | 0 |" in markdown
+
+
+def test_summary_includes_top_directory_and_file_tables(tmp_path: Path) -> None:
+    result = _result(
+        index=1,
+        repository="repo",
+        health_score=40,
+        high=3,
+        top_directories=({"path": "charts/app", "actionable_findings": 3},),
+        top_files=({"path": "charts/app/values.yaml", "actionable_findings": 3},),
+    )
+
+    _, markdown_path, json_path = write_analysis_summaries([result], tmp_path)
+
+    markdown = markdown_path.read_text(encoding="utf-8")
+    assert "## Top directories by actionable findings" in markdown
+    assert "| repo | charts/app | 3 |" in markdown
+    assert "## Top files by actionable findings" in markdown
+    assert "| repo | charts/app/values.yaml | 3 |" in markdown
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    assert data["top_directories"][0]["path"] == "charts/app"
+    assert data["top_files"][0]["path"] == "charts/app/values.yaml"
 
 
 def test_analysis_summary_uses_relative_report_links(tmp_path: Path) -> None:

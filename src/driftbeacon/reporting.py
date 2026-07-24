@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+from .analysis_metrics import source_label
 from .config import DEFAULT_PRODUCTION_PATTERNS
 from .models import ComparisonSummary, Finding, ScanResult
 from .prioritise import PrioritisedFinding, prioritise_findings
 from .redaction import redact_secrets, truncate
-from .scoring import actionable_active_findings, actionable_findings
+from .scoring import (
+    HEALTH_RISK_SCALE,
+    SCORE_FORMULA_VERSION,
+    SEVERITY_WEIGHTS,
+    actionable_active_findings,
+    actionable_findings,
+)
 
 
 def generate_report(
@@ -32,7 +39,9 @@ def generate_report(
         f"**Repository:** {redact_secrets(scan.repository)}",
         f"**Branch:** {redact_secrets(scan.branch)}",
         f"**Commit:** `{scan.commit_sha[:12]}`",
-        f"**Health score:** {scan.health_score}/100 ({_health_trend(comparison)})",
+        f"**Health score:** {_health_score_text(scan)} ({_health_trend(comparison)})",
+        f"**Coverage:** {_coverage_text(scan)}",
+        f"**Score status:** {_score_state_text(scan)}",
         f"**Active findings:** {active_count}",
         f"**Trend:** {_change_sentence(comparison)}",
         "",
@@ -56,16 +65,34 @@ def generate_report(
         suffix = f": {message}" if message else ""
         lines.append(f"- {status.name.capitalize()}: {pretty_state}{suffix}")
 
+    if _summary_text(scan, "coverage_state", "") == "partial_coverage":
+        lines.extend(["", "## Coverage warning"])
+        lines.append(
+            "One or more applicable scanners failed, so this score is based on partial coverage."
+        )
+
     lines.extend(["", "## Finding audit"])
     lines.extend(_audit_lines(scan))
+    lines.extend(_breakdown_section(scan, "Finding source breakdown", "finding_source_breakdown"))
+    lines.extend(
+        _breakdown_section(scan, "Findings by directory group", "directory_group_breakdown")
+    )
+    lines.extend(_top_paths_section(scan))
 
     lines.extend(["", "## Scoring model"])
     lines.append(
-        "Health starts at 100 and subtracts capped penalties for deduplicated active "
-        "critical, high, medium, and low findings. Informational findings, unknown-severity "
-        "findings, passed checks, scanner metadata, and first-scan baseline status do not "
-        "reduce the score."
+        f"Formula {SCORE_FORMULA_VERSION}: health = round(100 * exp(-weighted_risk / "
+        f"{HEALTH_RISK_SCALE})). Default weights are critical={SEVERITY_WEIGHTS['critical']}, "
+        f"high={SEVERITY_WEIGHTS['high']}, medium={SEVERITY_WEIGHTS['medium']}, "
+        f"low={SEVERITY_WEIGHTS['low']}. Informational findings, unknown-severity findings, "
+        "passed checks, skipped scanners, scanner-error records, duplicates, and first-scan "
+        "baseline status do not reduce the score."
     )
+    if comparison.score_formula_changed:
+        lines.append(
+            "The previous baseline used a different or unknown health formula, so raw health "
+            "movement is not directly comparable."
+        )
 
     if comparison.resolved_findings:
         lines.extend(["", "## Recently resolved"])
@@ -134,6 +161,9 @@ def _audit_lines(scan: ScanResult) -> list[str]:
         f"- Passed checks: {summary.get('passed_checks', 0)}",
         f"- Duplicate findings removed: {summary.get('duplicate_findings_removed', 0)}",
         f"- Scanner errors: {summary.get('scanner_errors', 0)}",
+        f"- Score reason: {_summary_text(scan, 'score_reason', 'n/a')}",
+        "- Score formula version: "
+        f"{_summary_text(scan, 'score_formula_version', SCORE_FORMULA_VERSION)}",
     ]
 
 
@@ -144,6 +174,8 @@ def _severity_label(finding: Finding) -> str:
 
 
 def _health_trend(comparison: ComparisonSummary) -> str:
+    if comparison.score_formula_changed:
+        return "health model changed"
     if comparison.health_score_change is None:
         return "first scan"
     if comparison.health_score_change > 0:
@@ -162,7 +194,7 @@ def _what_happened(
     else:
         finding_summary = f"DriftBeacon normalized {_plural(active_count, 'active finding')}."
     if comparison.has_baseline:
-        return f"{scanner_summary} {finding_summary} Health is {scan.health_score}/100."
+        return f"{scanner_summary} {finding_summary} Health is {_health_score_text(scan)}."
     return (
         f"{scanner_summary} {finding_summary} This is the first baseline, so current findings "
         "establish the starting point for future comparisons."
@@ -199,7 +231,9 @@ def _change_lines(comparison: ComparisonSummary) -> list[str]:
         f"- {_plural(recurring_count, 'recurring finding')}",
         f"- {_plural(resolved_count, 'resolved finding')}",
         f"- {_plural(len(comparison.severity_changes), 'severity change')}",
-        f"- Health score {_health_trend(comparison)}",
+        "- Health model changed; score movement is not directly comparable."
+        if comparison.score_formula_changed
+        else f"- Health score {_health_trend(comparison)}",
     ]
 
 
@@ -213,8 +247,116 @@ def _change_sentence(comparison: ComparisonSummary) -> str:
         f"{_plural(new_count, 'new finding')}, "
         f"{_plural(recurring_count, 'recurring finding')}, "
         f"{_plural(resolved_count, 'resolved finding')}, "
-        f"health score {_health_trend(comparison)}"
+        + (
+            "health model changed"
+            if comparison.score_formula_changed
+            else f"health score {_health_trend(comparison)}"
+        )
     )
+
+
+def _health_score_text(scan: ScanResult) -> str:
+    if scan.health_score is None:
+        return "Not scored"
+    return f"{scan.health_score}/100"
+
+
+def _summary_text(scan: ScanResult, key: str, default: str) -> str:
+    value = scan.summary.get(key, default)
+    return str(value)
+
+
+def _coverage_text(scan: ScanResult) -> str:
+    labels = {
+        "complete_coverage": "Complete",
+        "partial_coverage": "Partial",
+        "not_scored_no_supported_files": "Not scored",
+        "not_scored_all_scanners_failed": "Not scored",
+    }
+    return labels.get(_summary_text(scan, "coverage_state", "unknown"), "Unknown")
+
+
+def _score_state_text(scan: ScanResult) -> str:
+    labels = {
+        "scored": "Scored",
+        "not_scored_no_supported_files": "Not scored",
+        "not_scored_all_scanners_failed": "Not scored",
+    }
+    return labels.get(_summary_text(scan, "score_state", "unknown"), "Unknown")
+
+
+def _breakdown_label(heading: str) -> str:
+    return "Directory group" if "directory" in heading.lower() else "Source"
+
+
+def _breakdown_section(scan: ScanResult, heading: str, key: str) -> list[str]:
+    raw = scan.summary.get(key)
+    if not isinstance(raw, dict):
+        return []
+    lines = [
+        "",
+        f"## {heading}",
+        "",
+        f"| {_breakdown_label(heading)} | Critical | High | Medium | Low | Total |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    if not raw:
+        lines.append("| - | 0 | 0 | 0 | 0 | 0 |")
+        return lines
+    for source, row in sorted(
+        raw.items(),
+        key=lambda item: item[1].get("total_actionable", 0)
+        if isinstance(item[1], dict)
+        else 0,
+        reverse=True,
+    ):
+        if not isinstance(row, dict):
+            continue
+        lines.append(
+            "| "
+            f"{source_label(str(source))} | {row.get('critical', 0)} | {row.get('high', 0)} | "
+            f"{row.get('medium', 0)} | {row.get('low', 0)} | "
+            f"{row.get('total_actionable', 0)} |"
+        )
+    return lines
+
+
+def _top_paths_section(scan: ScanResult) -> list[str]:
+    lines: list[str] = []
+    lines.extend(
+        _top_path_table(
+            scan.summary.get("top_directories"),
+            heading="Top directories by actionable findings",
+            label="Directory",
+        )
+    )
+    lines.extend(
+        _top_path_table(
+            scan.summary.get("top_files"),
+            heading="Top files by actionable findings",
+            label="File",
+        )
+    )
+    return lines
+
+
+def _top_path_table(raw: object, *, heading: str, label: str) -> list[str]:
+    if not isinstance(raw, list) or not raw:
+        return []
+    lines = [
+        "",
+        f"## {heading}",
+        "",
+        f"| {label} | Actionable findings |",
+        "| --- | ---: |",
+    ]
+    for item in raw[:10]:
+        if isinstance(item, dict):
+            lines.append(
+                f"| {item.get('path', 'unknown')} | "
+                f"{item.get('actionable_findings', 0)} |"
+            )
+    return lines
 
 
 def _plural(count: int, label: str) -> str:
