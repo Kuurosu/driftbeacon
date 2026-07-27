@@ -155,6 +155,7 @@ Implemented in this phase:
 - local public web scan MVP;
 - public GitHub URL validation;
 - background scan execution;
+- separate web and worker processes for the public scan flow;
 - structured status polling;
 - Production Health-first web report;
 - SQLite-backed scan metadata;
@@ -164,6 +165,7 @@ Implemented in this phase:
 - startup recovery for interrupted queued or running scans;
 - no-op analytics boundary;
 - configurable scan limits.
+- Docker Compose packaging for a controlled single-instance public demo.
 
 Explicitly out of scope:
 

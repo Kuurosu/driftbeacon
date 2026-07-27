@@ -63,3 +63,24 @@ def test_web_cleanup_parser_accepts_output_dir() -> None:
 
     assert args.command == "web-cleanup"
     assert args.output_dir == Path(".driftbeacon-web-test")
+
+
+def test_worker_parser_accepts_once_and_poll_options() -> None:
+    args = build_parser().parse_args(
+        [
+            "worker",
+            "--output-dir",
+            ".driftbeacon-web-test",
+            "--worker-id",
+            "worker-a",
+            "--poll-interval",
+            "0.5",
+            "--once",
+        ]
+    )
+
+    assert args.command == "worker"
+    assert args.output_dir == Path(".driftbeacon-web-test")
+    assert args.worker_id == "worker-a"
+    assert args.poll_interval == 0.5
+    assert args.once is True

@@ -1,0 +1,22 @@
+{$DRIFTBEACON_SITE_ADDRESS:http://localhost:8080} {
+  encode zstd gzip
+
+  request_body {
+    max_size 8KB
+  }
+
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    X-Content-Type-Options "nosniff"
+    X-Frame-Options "DENY"
+    Referrer-Policy "no-referrer"
+    Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    -Server
+  }
+
+  reverse_proxy web:8080 {
+    header_up X-Forwarded-Proto {scheme}
+    header_up X-Forwarded-Host {host}
+    header_up X-Real-IP {remote_host}
+  }
+}

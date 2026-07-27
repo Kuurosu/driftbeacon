@@ -16,7 +16,7 @@ from .models import ComparisonSummary, Finding, ScanResult
 from .storage import StorageError
 
 WEB_REPORT_FORMAT_VERSION = "web-report-v1"
-WEB_SCHEMA_VERSION = 1
+WEB_SCHEMA_VERSION = 2
 
 ScanStatus = Literal[
     "queued",
@@ -62,6 +62,10 @@ class WebScanState:
     production_grade: str | None = None
     coverage_status: str | None = None
     baseline_type: str | None = None
+    worker_id: str | None = None
+    claimed_at: datetime | None = None
+    heartbeat_at: datetime | None = None
+    attempt_count: int = 0
 
     @property
     def done(self) -> bool:
@@ -155,13 +159,69 @@ class SQLiteScanStore:
                   expires_at, error_code, safe_error_message, report_reference,
                   report_format_version, repository, branch, commit_sha, overall_health,
                   overall_grade, production_health, production_grade, coverage_status,
-                  baseline_type
+                  baseline_type, worker_id, claimed_at, heartbeat_at, attempt_count
                 ) VALUES (
-                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                  ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  ?, ?, ?, ?
                 )
                 """,
                 _state_values(state),
             )
+
+    def claim_next_queued_scan(
+        self,
+        *,
+        worker_id: str,
+        now: datetime | None = None,
+    ) -> WebScanState | None:
+        timestamp = now or datetime.now(UTC)
+        with self._connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    """
+                    SELECT scan_id
+                    FROM scans
+                    WHERE status = 'queued'
+                    ORDER BY created_at ASC
+                    LIMIT 1
+                    """
+                ).fetchone()
+                if row is None:
+                    connection.execute("COMMIT")
+                    return None
+                scan_id = str(row["scan_id"])
+                cursor = connection.execute(
+                    """
+                    UPDATE scans
+                    SET status = 'cloning',
+                        message = 'Cloning public GitHub repository.',
+                        progress = 15,
+                        started_at = COALESCE(started_at, ?),
+                        updated_at = ?,
+                        worker_id = ?,
+                        claimed_at = ?,
+                        heartbeat_at = ?,
+                        attempt_count = attempt_count + 1
+                    WHERE scan_id = ?
+                      AND status = 'queued'
+                    """,
+                    (
+                        _format_datetime(timestamp),
+                        _format_datetime(timestamp),
+                        worker_id,
+                        _format_datetime(timestamp),
+                        _format_datetime(timestamp),
+                        scan_id,
+                    ),
+                )
+                connection.execute("COMMIT")
+            except sqlite3.Error:
+                connection.execute("ROLLBACK")
+                raise
+        if not cursor.rowcount:
+            return None
+        return self.get_scan(scan_id)
 
     def get_scan(self, scan_id: str) -> WebScanState | None:
         if not valid_scan_id(scan_id):
@@ -200,7 +260,12 @@ class SQLiteScanStore:
                     updated_at = ?,
                     expires_at = COALESCE(?, expires_at),
                     error_code = COALESCE(?, error_code),
-                    safe_error_message = COALESCE(?, safe_error_message)
+                    safe_error_message = COALESCE(?, safe_error_message),
+                    heartbeat_at = CASE
+                      WHEN ? IN ('cloning', 'analysing', 'generating_report')
+                      THEN ?
+                      ELSE heartbeat_at
+                    END
                 WHERE scan_id = ?
                 """,
                 (
@@ -213,7 +278,36 @@ class SQLiteScanStore:
                     _format_datetime(expires_at),
                     error_code,
                     safe_error_message,
+                    status,
+                    _format_datetime(now),
                     scan_id,
+                ),
+            )
+
+    def heartbeat(
+        self,
+        scan_id: str,
+        *,
+        worker_id: str,
+        now: datetime | None = None,
+    ) -> None:
+        validate_scan_id(scan_id)
+        timestamp = now or datetime.now(UTC)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE scans
+                SET heartbeat_at = ?,
+                    updated_at = ?
+                WHERE scan_id = ?
+                  AND worker_id = ?
+                  AND status IN ('cloning', 'analysing', 'generating_report')
+                """,
+                (
+                    _format_datetime(timestamp),
+                    _format_datetime(timestamp),
+                    scan_id,
+                    worker_id,
                 ),
             )
 
@@ -256,7 +350,9 @@ class SQLiteScanStore:
                     production_health = ?,
                     production_grade = ?,
                     coverage_status = ?,
-                    baseline_type = ?
+                    baseline_type = ?,
+                    heartbeat_at = ?,
+                    worker_id = worker_id
                 WHERE scan_id = ?
                 """,
                 (
@@ -274,6 +370,7 @@ class SQLiteScanStore:
                     production_grade,
                     coverage_status,
                     baseline_type,
+                    _format_datetime(completed_at),
                     scan_id,
                 ),
             )
@@ -323,6 +420,30 @@ class SQLiteScanStore:
             ).fetchone()
         return int(row["count"]) if row is not None else 0
 
+    def count_running_scans(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM scans
+                WHERE status IN ('cloning', 'analysing', 'generating_report')
+                """
+            ).fetchone()
+        return int(row["count"]) if row is not None else 0
+
+    def count_recent_failed_scans(self, *, since: datetime) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM scans
+                WHERE status = 'failed'
+                  AND completed_at >= ?
+                """,
+                (_format_datetime(since),),
+            ).fetchone()
+        return int(row["count"]) if row is not None else 0
+
     def mark_interrupted_scans(
         self,
         *,
@@ -341,7 +462,7 @@ class SQLiteScanStore:
                     expires_at = COALESCE(expires_at, ?),
                     error_code = 'scan_interrupted',
                     safe_error_message = 'The scan was interrupted before completion.'
-                WHERE status IN ('queued', 'cloning', 'analysing', 'generating_report')
+                WHERE status IN ('cloning', 'analysing', 'generating_report')
                 """,
                 (
                     _format_datetime(now),
@@ -350,6 +471,45 @@ class SQLiteScanStore:
                 ),
             )
         return int(cursor.rowcount or 0)
+
+    def mark_stale_claimed_scans_failed(
+        self,
+        *,
+        stale_before: datetime,
+        now: datetime,
+        expires_at: datetime,
+    ) -> int:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE scans
+                SET status = 'failed',
+                    message = 'The scan was interrupted before completion.',
+                    progress = 100,
+                    completed_at = COALESCE(completed_at, ?),
+                    updated_at = ?,
+                    expires_at = COALESCE(expires_at, ?),
+                    error_code = 'scan_interrupted',
+                    safe_error_message = 'The scan was interrupted before completion.'
+                WHERE status IN ('cloning', 'analysing', 'generating_report')
+                  AND COALESCE(heartbeat_at, claimed_at, updated_at) <= ?
+                """,
+                (
+                    _format_datetime(now),
+                    _format_datetime(now),
+                    _format_datetime(expires_at),
+                    _format_datetime(stale_before),
+                ),
+            )
+        return int(cursor.rowcount or 0)
+
+    def check_ready(self) -> bool:
+        with self._connect() as connection:
+            version = connection.execute(
+                "SELECT version FROM web_schema_version WHERE id = 1"
+            ).fetchone()
+            connection.execute("SELECT COUNT(*) FROM scans").fetchone()
+        return version is not None and int(version["version"]) == WEB_SCHEMA_VERSION
 
     def _initialise(self) -> None:
         with self._connect(initialising=True) as connection:
@@ -366,52 +526,86 @@ class SQLiteScanStore:
             ).fetchone()
             if row is not None:
                 version = int(row["version"])
-                if version != WEB_SCHEMA_VERSION:
+                if version == 1:
+                    self._migrate_v1_to_v2(connection)
+                    connection.execute(
+                        "UPDATE web_schema_version SET version = ? WHERE id = 1",
+                        (WEB_SCHEMA_VERSION,),
+                    )
+                elif version != WEB_SCHEMA_VERSION:
                     raise StorageError(
                         f"unsupported DriftBeacon web database schema version: {version}"
                     )
             else:
+                self._create_scans_table(connection)
                 connection.execute(
                     "INSERT INTO web_schema_version (id, version) VALUES (1, ?)",
                     (WEB_SCHEMA_VERSION,),
                 )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS scans (
-                  scan_id TEXT PRIMARY KEY,
-                  repository_url TEXT NOT NULL,
-                  repository_owner TEXT NOT NULL,
-                  repository_name TEXT NOT NULL,
-                  status TEXT NOT NULL,
-                  message TEXT NOT NULL,
-                  progress INTEGER NOT NULL,
-                  created_at TEXT NOT NULL,
-                  started_at TEXT,
-                  completed_at TEXT,
-                  updated_at TEXT NOT NULL,
-                  expires_at TEXT,
-                  error_code TEXT,
-                  safe_error_message TEXT,
-                  report_reference TEXT,
-                  report_format_version TEXT NOT NULL,
-                  repository TEXT,
-                  branch TEXT,
-                  commit_sha TEXT,
-                  overall_health INTEGER,
-                  overall_grade TEXT,
-                  production_health INTEGER,
-                  production_grade TEXT,
-                  coverage_status TEXT,
-                  baseline_type TEXT
-                )
-                """
-            )
+            self._create_scans_table(connection)
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS scans_expires_at_idx ON scans(expires_at)"
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS scans_status_idx ON scans(status)"
             )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS scans_claim_idx ON scans(status, claimed_at)"
+            )
+
+    def _create_scans_table(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scans (
+              scan_id TEXT PRIMARY KEY,
+              repository_url TEXT NOT NULL,
+              repository_owner TEXT NOT NULL,
+              repository_name TEXT NOT NULL,
+              status TEXT NOT NULL,
+              message TEXT NOT NULL,
+              progress INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              started_at TEXT,
+              completed_at TEXT,
+              updated_at TEXT NOT NULL,
+              expires_at TEXT,
+              error_code TEXT,
+              safe_error_message TEXT,
+              report_reference TEXT,
+              report_format_version TEXT NOT NULL,
+              repository TEXT,
+              branch TEXT,
+              commit_sha TEXT,
+              overall_health INTEGER,
+              overall_grade TEXT,
+              production_health INTEGER,
+              production_grade TEXT,
+              coverage_status TEXT,
+              baseline_type TEXT,
+              worker_id TEXT,
+              claimed_at TEXT,
+              heartbeat_at TEXT,
+              attempt_count INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+
+    def _migrate_v1_to_v2(self, connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(scans)").fetchall()
+        }
+        additions = {
+            "worker_id": "ALTER TABLE scans ADD COLUMN worker_id TEXT",
+            "claimed_at": "ALTER TABLE scans ADD COLUMN claimed_at TEXT",
+            "heartbeat_at": "ALTER TABLE scans ADD COLUMN heartbeat_at TEXT",
+            "attempt_count": (
+                "ALTER TABLE scans ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0"
+            ),
+        }
+        for column, statement in additions.items():
+            if column not in columns:
+                connection.execute(statement)
 
     def _connect(self, *, initialising: bool = False) -> sqlite3.Connection:
         try:
@@ -482,6 +676,22 @@ class FileReportStore:
             if scan_dir.is_symlink():
                 raise StorageError("refusing to delete symlinked report directory")
             shutil.rmtree(scan_dir)
+
+    def check_writable(self) -> bool:
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=self.report_dir,
+                prefix=".driftbeacon-health-",
+                delete=False,
+            ) as handle:
+                handle.write("ok")
+                temp_path = Path(handle.name)
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            return False
+        return True
 
     def _scan_dir(self, scan_id: str) -> Path:
         validate_scan_id(scan_id)
@@ -559,6 +769,10 @@ def _state_values(state: WebScanState) -> tuple[Any, ...]:
         state.production_grade,
         state.coverage_status,
         state.baseline_type,
+        state.worker_id,
+        _format_datetime(state.claimed_at),
+        _format_datetime(state.heartbeat_at),
+        state.attempt_count,
     )
 
 
@@ -592,6 +806,10 @@ def _state_from_row(row: sqlite3.Row) -> WebScanState:
         production_grade=_optional_str(row["production_grade"]),
         coverage_status=_optional_str(row["coverage_status"]),
         baseline_type=_optional_str(row["baseline_type"]),
+        worker_id=_optional_str(row["worker_id"]),
+        claimed_at=_parse_datetime(row["claimed_at"]),
+        heartbeat_at=_parse_datetime(row["heartbeat_at"]),
+        attempt_count=_optional_int(row["attempt_count"]) or 0,
     )
 
 

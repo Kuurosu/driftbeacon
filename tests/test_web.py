@@ -29,6 +29,7 @@ from driftbeacon.web import (
     render_repository_report_page,
     run_public_repository_scan,
 )
+from driftbeacon.worker import WebScanWorker, WorkerConfig
 
 
 def _request(
@@ -184,11 +185,8 @@ def test_public_github_url_validation_is_strict() -> None:
 
 
 def test_web_routes_submit_scan_and_render_status(tmp_path: Path) -> None:
-    service = WebScanService(
-        _web_config(tmp_path),
-        runner=_fake_runner,
-        synchronous=True,
-    )
+    config = _web_config(tmp_path)
+    service = WebScanService(config)
     app = DriftBeaconWebApp(service)
 
     status, _headers, body = _request(app, "GET", "/")
@@ -204,15 +202,31 @@ def test_web_routes_submit_scan_and_render_status(tmp_path: Path) -> None:
 
     status, _headers, body = _request(app, "GET", location)
     assert status.startswith("200")
-    assert "owner/repo" in body
-    assert "What to fix next" in body
+    assert "Queued for analysis" in body
 
     scan_id = location.rsplit("/", 1)[-1]
     status, _headers, body = _request(app, "GET", f"/api/scans/{scan_id}")
     data = json.loads(body)
     assert status.startswith("200")
+    assert data["status"] == "queued"
+
+    worker = WebScanWorker(
+        config,
+        WorkerConfig(worker_id="test-worker", poll_interval_seconds=0.1, stale_seconds=60),
+        runner=_fake_runner,
+    )
+    assert worker.process_once() is True
+
+    status, _headers, body = _request(app, "GET", f"/api/scans/{scan_id}")
+    data = json.loads(body)
+    assert status.startswith("200")
     assert data["status"] == "completed"
     assert data["repository"] == "owner/repo"
+
+    status, _headers, body = _request(app, "GET", location)
+    assert status.startswith("200")
+    assert "owner/repo" in body
+    assert "What to fix next" in body
 
     status, _headers, body = _request(app, "GET", f"/scans/{scan_id}/report.md")
     assert status.startswith("200")
@@ -222,9 +236,7 @@ def test_web_routes_submit_scan_and_render_status(tmp_path: Path) -> None:
     assert status.startswith("200")
     assert json.loads(body)["scan"]["repository"] == "owner/repo"
 
-    restarted = DriftBeaconWebApp(
-        WebScanService(_web_config(tmp_path), runner=_fake_runner, synchronous=True)
-    )
+    restarted = DriftBeaconWebApp(WebScanService(config))
     status, _headers, body = _request(restarted, "GET", location)
     assert status.startswith("200")
     assert "owner/repo" in body
@@ -232,11 +244,7 @@ def test_web_routes_submit_scan_and_render_status(tmp_path: Path) -> None:
 
 
 def test_web_rejects_invalid_repository_without_starting_scan(tmp_path: Path) -> None:
-    service = WebScanService(
-        _web_config(tmp_path),
-        runner=_fake_runner,
-        synchronous=True,
-    )
+    service = WebScanService(_web_config(tmp_path))
     app = DriftBeaconWebApp(service)
 
     status, _headers, body = _request(
@@ -248,6 +256,55 @@ def test_web_rejects_invalid_repository_without_starting_scan(tmp_path: Path) ->
 
     assert status.startswith("400")
     assert "Only HTTPS GitHub repository URLs are supported" in body
+
+
+def test_health_endpoints_do_not_expose_internal_paths(tmp_path: Path) -> None:
+    service = WebScanService(_web_config(tmp_path))
+    app = DriftBeaconWebApp(service)
+
+    live_status, _headers, live_body = _request(app, "GET", "/health/live")
+    ready_status, _headers, ready_body = _request(app, "GET", "/health/ready")
+
+    assert live_status.startswith("200")
+    assert json.loads(live_body) == {"status": "alive"}
+    assert ready_status.startswith("200")
+    assert json.loads(ready_body) == {"status": "ready"}
+    assert str(tmp_path) not in live_body
+    assert str(tmp_path) not in ready_body
+
+
+def test_readiness_fails_safely_when_storage_is_unhealthy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = WebScanService(_web_config(tmp_path))
+    monkeypatch.setattr(service.store, "check_ready", lambda: False)
+    app = DriftBeaconWebApp(service)
+
+    status, _headers, body = _request(app, "GET", "/health/ready")
+
+    assert status.startswith("503")
+    assert json.loads(body) == {"status": "not_ready"}
+    assert str(tmp_path) not in body
+
+
+def test_web_submission_only_queues_scan(tmp_path: Path) -> None:
+    service = WebScanService(_web_config(tmp_path))
+    app = DriftBeaconWebApp(service)
+
+    status, headers, _body = _request(
+        app,
+        "POST",
+        "/scans",
+        body=urlencode({"repository_url": "https://github.com/owner/repo"}),
+    )
+    scan_id = headers["Location"].rsplit("/", 1)[-1]
+    state = service.get(scan_id)
+
+    assert status.startswith("303")
+    assert state is not None
+    assert state.status == "queued"
+    assert service.report_store.load(scan_id) is None
 
 
 def test_web_report_prioritises_production_health_and_reuses_explanations(
@@ -325,13 +382,13 @@ def test_web_service_uses_configurable_limits_without_plan_enforcement(tmp_path:
         max_repository_bytes=1024 * 1024,
         top_findings=3,
     )
-    service = WebScanService(config, runner=_fake_runner, synchronous=True)
+    service = WebScanService(config)
 
     first = service.submit("https://github.com/owner/one", client_id="client")
     second = service.submit("https://github.com/owner/two", client_id="client")
 
-    assert first.status == "completed"
-    assert second.status == "completed"
+    assert first.status == "queued"
+    assert second.status == "queued"
     assert not hasattr(config, "plan")
 
     with pytest.raises(ValueError, match="Too many scans"):
@@ -355,7 +412,7 @@ def test_web_rejects_when_queue_capacity_is_full(tmp_path: Path) -> None:
         max_repository_bytes=1024 * 1024,
         top_findings=3,
     )
-    service = WebScanService(config, runner=_fake_runner, synchronous=True)
+    service = WebScanService(config)
     app = DriftBeaconWebApp(service)
 
     status, _headers, body = _request(

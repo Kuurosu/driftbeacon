@@ -78,6 +78,82 @@ def test_sqlite_scan_state_survives_new_store_instance(tmp_path: Path) -> None:
     assert state.repository_owner == "owner"
 
 
+def test_worker_claims_one_queued_scan_atomically(tmp_path: Path) -> None:
+    database = tmp_path / "web.sqlite3"
+    store = SQLiteScanStore(database)
+    store.create_scan(_state("abcdef123456", tmp_path))
+
+    claimed = store.claim_next_queued_scan(
+        worker_id="worker-one",
+        now=datetime.now(UTC),
+    )
+    second_claim = store.claim_next_queued_scan(
+        worker_id="worker-two",
+        now=datetime.now(UTC),
+    )
+
+    assert claimed is not None
+    assert claimed.scan_id == "abcdef123456"
+    assert claimed.status == "cloning"
+    assert claimed.worker_id == "worker-one"
+    assert claimed.attempt_count == 1
+    assert second_claim is None
+
+
+def test_completed_and_failed_scans_are_not_reclaimed(tmp_path: Path) -> None:
+    store = SQLiteScanStore(tmp_path / "web.sqlite3")
+    store.create_scan(_state("abcdef123456", tmp_path, status="completed"))
+    store.create_scan(_state("abcdef123457", tmp_path, status="failed"))
+
+    assert store.claim_next_queued_scan(worker_id="worker", now=datetime.now(UTC)) is None
+
+
+def test_claim_state_survives_store_recreation(tmp_path: Path) -> None:
+    database = tmp_path / "web.sqlite3"
+    store = SQLiteScanStore(database)
+    store.create_scan(_state("abcdef123456", tmp_path))
+    store.claim_next_queued_scan(worker_id="worker-one", now=datetime.now(UTC))
+
+    reloaded = SQLiteScanStore(database)
+    state = reloaded.get_scan("abcdef123456")
+
+    assert state is not None
+    assert state.status == "cloning"
+    assert state.worker_id == "worker-one"
+    assert state.claimed_at is not None
+
+
+def test_stale_worker_claims_become_safe_failures(tmp_path: Path) -> None:
+    store = SQLiteScanStore(tmp_path / "web.sqlite3")
+    store.create_scan(_state("abcdef123456", tmp_path))
+    old = datetime.now(UTC) - timedelta(minutes=15)
+    store.claim_next_queued_scan(worker_id="worker-one", now=old)
+
+    failed = store.mark_stale_claimed_scans_failed(
+        stale_before=datetime.now(UTC) - timedelta(minutes=10),
+        now=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(days=7),
+    )
+    state = store.get_scan("abcdef123456")
+
+    assert failed == 1
+    assert state is not None
+    assert state.status == "failed"
+    assert state.error_code == "scan_interrupted"
+
+
+def test_queued_scans_survive_web_service_recreation(tmp_path: Path) -> None:
+    config = _web_config(tmp_path)
+    service = WebScanService(config)
+    submitted = service.submit("https://github.com/owner/repo")
+
+    restarted = WebScanService(config)
+    state = restarted.get(submitted.scan_id)
+
+    assert state is not None
+    assert state.status == "queued"
+
+
 def test_sqlite_schema_initialises_and_rejects_unsupported_version(tmp_path: Path) -> None:
     database = tmp_path / "web.sqlite3"
     SQLiteScanStore(database)
@@ -92,6 +168,54 @@ def test_sqlite_schema_initialises_and_rejects_unsupported_version(tmp_path: Pat
 
     with pytest.raises(StorageError, match="unsupported DriftBeacon web database schema version"):
         SQLiteScanStore(bad_database)
+
+
+def test_sqlite_v1_schema_migrates_to_worker_queue_columns(tmp_path: Path) -> None:
+    database = tmp_path / "v1.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE web_schema_version (id INTEGER PRIMARY KEY, version INTEGER NOT NULL)"
+        )
+        connection.execute("INSERT INTO web_schema_version (id, version) VALUES (1, 1)")
+        connection.execute(
+            """
+            CREATE TABLE scans (
+              scan_id TEXT PRIMARY KEY,
+              repository_url TEXT NOT NULL,
+              repository_owner TEXT NOT NULL,
+              repository_name TEXT NOT NULL,
+              status TEXT NOT NULL,
+              message TEXT NOT NULL,
+              progress INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              started_at TEXT,
+              completed_at TEXT,
+              updated_at TEXT NOT NULL,
+              expires_at TEXT,
+              error_code TEXT,
+              safe_error_message TEXT,
+              report_reference TEXT,
+              report_format_version TEXT NOT NULL,
+              repository TEXT,
+              branch TEXT,
+              commit_sha TEXT,
+              overall_health INTEGER,
+              overall_grade TEXT,
+              production_health INTEGER,
+              production_grade TEXT,
+              coverage_status TEXT,
+              baseline_type TEXT
+            )
+            """
+        )
+
+    store = SQLiteScanStore(database)
+    store.create_scan(_state("abcdef123456", tmp_path))
+    claimed = store.claim_next_queued_scan(worker_id="worker", now=datetime.now(UTC))
+
+    assert store.check_ready() is True
+    assert claimed is not None
+    assert claimed.worker_id == "worker"
 
 
 def test_sqlite_insert_uses_parameters_for_repository_url(tmp_path: Path) -> None:

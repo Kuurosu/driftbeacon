@@ -21,6 +21,7 @@ from .scanners import ScannerExecution
 from .slack import send_slack_report_from_path
 from .storage import LocalStorage, StorageError
 from .web import WebConfig, cleanup_web_storage, run_web_server
+from .worker import WebScanWorker, WorkerConfig
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -49,6 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Examples:\n"
             "  driftbeacon run --repository-path . --output-dir .driftbeacon --no-slack\n"
             "  driftbeacon web --port 8080\n"
+            "  driftbeacon worker\n"
             "  driftbeacon analyse-repo https://github.com/org/infrastructure.git\n"
             "  driftbeacon analyse repos.txt --workers 4\n"
             "  driftbeacon run --checkov-json examples/sample-checkov.json "
@@ -60,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version="driftbeacon 0.1.0")
     subparsers = parser.add_subparsers(
         dest="command",
-        metavar="{scan,report,compare,send-slack,run,web,web-cleanup,analyse-repo,analyse}",
+        metavar="{scan,report,compare,send-slack,run,web,worker,web-cleanup,analyse-repo,analyse}",
         required=True,
     )
 
@@ -111,14 +113,14 @@ def build_parser() -> argparse.ArgumentParser:
     web_parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path(".driftbeacon-web"),
+        default=Path(".driftbeacon"),
         help="Directory for web scan reports and state.",
     )
     web_parser.add_argument(
         "--max-concurrent-scans",
         type=int,
         default=2,
-        help="Maximum background scans to run at once.",
+        help="Compatibility setting for web limits; scan execution is handled by workers.",
     )
     web_parser.add_argument(
         "--scanner-timeout",
@@ -142,6 +144,33 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path(".driftbeacon"),
         help="Base directory for web SQLite, reports and work state.",
+    )
+
+    worker_parser = subparsers.add_parser(
+        "worker",
+        help="Claim and process queued public web scan jobs.",
+    )
+    worker_parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path(".driftbeacon"),
+        help="Base directory for web SQLite, reports and worker state.",
+    )
+    worker_parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=None,
+        help="Seconds to wait between queue polls.",
+    )
+    worker_parser.add_argument(
+        "--worker-id",
+        default=None,
+        help="Stable identifier for this worker process.",
+    )
+    worker_parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Claim and process at most one queued scan, then exit.",
     )
 
     analyse_repo_parser = subparsers.add_parser(
@@ -181,6 +210,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return command_run(args)
     if command == "web":
         return command_web(args)
+    if command == "worker":
+        return command_worker(args)
     if command == "web-cleanup":
         return command_web_cleanup(args)
     if command == "analyse-repo":
@@ -295,6 +326,19 @@ def command_web_cleanup(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_worker(args: argparse.Namespace) -> int:
+    worker = WebScanWorker(
+        _web_config_from_args(args),
+        _worker_config_from_args(args),
+    )
+    if bool(args.once):
+        processed = worker.process_once()
+        print("Processed one queued scan." if processed else "No queued scans.")
+        return 0
+    worker.run_forever()
+    return 0
+
+
 def _web_config_from_args(args: argparse.Namespace) -> WebConfig:
     base = WebConfig.from_environment()
     output_dir = Path(args.output_dir)
@@ -306,7 +350,12 @@ def _web_config_from_args(args: argparse.Namespace) -> WebConfig:
         report_dir=Path(
             os.environ.get("DRIFTBEACON_WEB_REPORT_DIR", str(output_dir / "reports"))
         ),
-        working_dir=Path(os.environ.get("DRIFTBEACON_WEB_WORK_DIR", str(output_dir / "work"))),
+        working_dir=Path(
+            os.environ.get(
+                "DRIFTBEACON_SCAN_WORK_DIR",
+                os.environ.get("DRIFTBEACON_WEB_WORK_DIR", str(output_dir / "work")),
+            )
+        ),
         max_concurrent_scans=int(getattr(args, "max_concurrent_scans", base.max_concurrent_scans)),
         max_queued_scans=base.max_queued_scans,
         max_scan_seconds=base.max_scan_seconds,
@@ -317,6 +366,17 @@ def _web_config_from_args(args: argparse.Namespace) -> WebConfig:
         max_repository_files=base.max_repository_files,
         max_repository_bytes=base.max_repository_bytes,
         top_findings=base.top_findings,
+    ).validate()
+
+
+def _worker_config_from_args(args: argparse.Namespace) -> WorkerConfig:
+    base = WorkerConfig.from_environment()
+    return WorkerConfig(
+        worker_id=str(getattr(args, "worker_id", None) or base.worker_id),
+        poll_interval_seconds=float(
+            getattr(args, "poll_interval", None) or base.poll_interval_seconds
+        ),
+        stale_seconds=base.stale_seconds,
     ).validate()
 
 
