@@ -20,6 +20,7 @@ from .scan import run_scan
 from .scanners import ScannerExecution
 from .slack import send_slack_report_from_path
 from .storage import LocalStorage, StorageError
+from .web import WebConfig, run_web_server
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -47,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Examples:\n"
             "  driftbeacon run --repository-path . --output-dir .driftbeacon --no-slack\n"
+            "  driftbeacon web --port 8080\n"
             "  driftbeacon analyse-repo https://github.com/org/infrastructure.git\n"
             "  driftbeacon analyse repos.txt --workers 4\n"
             "  driftbeacon run --checkov-json examples/sample-checkov.json "
@@ -58,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version="driftbeacon 0.1.0")
     subparsers = parser.add_subparsers(
         dest="command",
-        metavar="{scan,report,compare,send-slack,run,analyse-repo,analyse}",
+        metavar="{scan,report,compare,send-slack,run,web,analyse-repo,analyse}",
         required=True,
     )
 
@@ -100,6 +102,37 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--timeout", type=int, default=300, help="Scanner timeout in seconds.")
     run_parser.add_argument("--github-summary-file", type=Path, default=_github_summary_path())
 
+    web_parser = subparsers.add_parser(
+        "web",
+        help="Run the public web scan MVP locally.",
+    )
+    web_parser.add_argument("--host", default="127.0.0.1", help="Host interface to bind.")
+    web_parser.add_argument("--port", type=int, default=8080, help="Port to bind.")
+    web_parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path(".driftbeacon-web"),
+        help="Directory for web scan reports and state.",
+    )
+    web_parser.add_argument(
+        "--max-concurrent-scans",
+        type=int,
+        default=2,
+        help="Maximum background scans to run at once.",
+    )
+    web_parser.add_argument(
+        "--scanner-timeout",
+        type=int,
+        default=300,
+        help="Scanner timeout in seconds.",
+    )
+    web_parser.add_argument(
+        "--clone-timeout",
+        type=int,
+        default=120,
+        help="Git clone timeout in seconds.",
+    )
+
     analyse_repo_parser = subparsers.add_parser(
         "analyse-repo",
         help="Clone and analyse one public Git repository.",
@@ -135,6 +168,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return command_send_slack(args)
     if command == "run":
         return command_run(args)
+    if command == "web":
+        return command_web(args)
     if command == "analyse-repo":
         return command_analyse_repo(args)
     if command == "analyse":
@@ -227,6 +262,27 @@ def command_send_slack(args: argparse.Namespace) -> int:
     )
     print(result.message)
     return 0 if result.sent or result.message.startswith("Slack skipped") else 1
+
+
+def command_web(args: argparse.Namespace) -> int:
+    base = WebConfig.from_environment()
+    config = WebConfig(
+        output_dir=Path(args.output_dir),
+        max_concurrent_scans=int(args.max_concurrent_scans),
+        scanner_timeout_seconds=int(args.scanner_timeout),
+        clone_timeout_seconds=int(args.clone_timeout),
+        scan_retention_seconds=base.scan_retention_seconds,
+        scans_per_hour=base.scans_per_hour,
+        max_repository_files=base.max_repository_files,
+        max_repository_bytes=base.max_repository_bytes,
+        top_findings=base.top_findings,
+    ).validate()
+    run_web_server(
+        str(args.host),
+        int(args.port),
+        config,
+    )
+    return 0
 
 
 def command_analyse_repo(args: argparse.Namespace) -> int:

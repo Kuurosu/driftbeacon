@@ -1,13 +1,16 @@
 # DriftBeacon
 
-DriftBeacon is an operational intelligence layer for small infrastructure and DevOps teams.
+DriftBeacon is a production-risk prioritisation platform for infrastructure and DevOps teams.
 
-The MVP connects repository scanners to a deterministic weekly Markdown report. It normalizes noisy Checkov and Trivy output, compares the current scan with the previous run, ranks the three most important issues, calculates a simple health score, and optionally posts a concise digest to Slack.
+Know exactly what to fix next to reduce production risk.
 
-It is intentionally not a hosted SaaS, chatbot, dashboard, database-backed platform, or AWS deployment. It runs for free in GitHub Actions or locally.
+DriftBeacon turns infrastructure, dependency and configuration findings into a prioritised engineering plan showing what to fix, why it matters, and where production risk is concentrated. Checkov and Trivy are scanner inputs; DriftBeacon's product layer is the normalisation, production context, prioritisation, Production Health reporting, trend history and notification workflow.
+
+The current repository includes a local CLI, GitHub Action workflows, repository-analysis mode, Slack reporting, and a dependency-free public web scan MVP. Billing, accounts, private repository monitoring and hosted multi-tenant infrastructure are planned product work, not implemented functionality in this open-source MVP.
 
 ## What The MVP Does
 
+- Runs a local public web scan MVP where a user can paste one public GitHub repository URL and receive an actionable Production Health report.
 - Runs through GitHub Actions on a weekly schedule or pull request changes.
 - Scans Terraform, CloudFormation, Kubernetes YAML, Dockerfiles, dependency manifests, misconfigurations, vulnerabilities, and optional secret findings.
 - Uses Checkov and Trivy instead of recreating scanners.
@@ -25,6 +28,9 @@ It is intentionally not a hosted SaaS, chatbot, dashboard, database-backed platf
 GitHub Actions or local CLI
         |
         v
+Public web scan / Repository analysis / GitHub Action
+        |
+        v
 Scanner adapters: Checkov, Trivy
         |
         v
@@ -34,10 +40,10 @@ Normalization: common Finding model and stable fingerprints
 Comparison: new, recurring, resolved, severity changes
         |
         v
-Scoring and prioritisation
+Context, scoring, Production Health and prioritisation
         |
         v
-Markdown report, JSON state, optional Slack webhook
+Web report, Markdown report, JSON/CSV state, optional Slack webhook
 ```
 
 The local storage backend writes generated files to `.driftbeacon/`. The storage interface is small enough to replace later with S3, PostgreSQL, or another history store.
@@ -66,6 +72,13 @@ Run the sample report without installing scanners:
 ```sh
 make run-sample
 open .driftbeacon-sample/report.md
+```
+
+Run the local public web scan MVP:
+
+```sh
+driftbeacon web --port 8080
+open http://127.0.0.1:8080
 ```
 
 Run against the current repository:
@@ -98,6 +111,7 @@ driftbeacon report
 driftbeacon compare
 driftbeacon send-slack
 driftbeacon run
+driftbeacon web
 driftbeacon analyse-repo
 driftbeacon analyse
 ```
@@ -123,6 +137,17 @@ driftbeacon run \
   --trivy-json examples/sample-trivy.json \
   --no-slack
 ```
+
+Public web scan MVP:
+
+```sh
+driftbeacon web \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --output-dir .driftbeacon-web
+```
+
+The web MVP accepts only HTTPS public GitHub repository URLs, clones into isolated temporary directories, uses the same DriftBeacon scan engine as the CLI, exposes structured status polling, deletes temporary clones after success or failure, and stores only generated reports and JSON state under `.driftbeacon-web/`.
 
 Analyse public Git repositories without manually cloning them:
 
@@ -397,10 +422,19 @@ driftbeacon run --config .driftbeacon.yml --no-slack
 
 The parser supports the documented YAML shape and fails clearly for invalid booleans, paths, thresholds, and report counts.
 
+## Product Direction
+
+- [Product direction](docs/product-direction.md) explains the Production Health positioning, Engineering Action Plan concept, execution models, AI boundaries, benchmarking constraints, and current MVP scope.
+- [Pricing strategy](docs/pricing-strategy.md) documents proposed paid tiers and future capability-based entitlements. Billing is not implemented in this MVP.
+- [Roadmap](docs/roadmap.md) separates the current public web scan MVP from planned accounts, GitHub App, billing, organisation intelligence, risk simulation, risk clusters and Ask DriftBeacon.
+
 ## Security Considerations
 
 - Slack webhook URLs are read only from environment variables.
 - Webhook URLs and obvious secrets are redacted from scanner text and Slack payloads.
+- The public web MVP accepts only HTTPS GitHub repository URLs and rejects credentials, query strings, fragments and non-GitHub hosts.
+- Web scans clone repositories into isolated temporary directories and delete temporary clones after success or failure.
+- Web scan concurrency, rate limits, clone timeouts, scanner timeouts, repository file limits and repository size limits are configurable.
 - Scanner subprocesses use argument arrays, not shell strings.
 - Scanner execution uses timeouts.
 - Repository walking does not follow symlinks and skips generated directories.

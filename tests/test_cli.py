@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from driftbeacon.cli import build_parser
 
 
@@ -26,3 +28,25 @@ def test_analyse_parser_accepts_repository_file_and_worker_count() -> None:
     assert args.command == "analyse"
     assert str(args.repository_file) == "repos.txt"
     assert args.workers == 8
+
+
+def test_web_parser_accepts_local_server_options() -> None:
+    args = build_parser().parse_args(
+        [
+            "web",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "9090",
+            "--output-dir",
+            ".driftbeacon-web-test",
+            "--max-concurrent-scans",
+            "1",
+        ]
+    )
+
+    assert args.command == "web"
+    assert args.host == "127.0.0.1"
+    assert args.port == 9090
+    assert args.output_dir == Path(".driftbeacon-web-test")
+    assert args.max_concurrent_scans == 1
