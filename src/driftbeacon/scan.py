@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,7 @@ def run_scan(
     checkov_json: Path | None = None,
     trivy_json: Path | None = None,
     compare_with_previous: bool = False,
+    deadline_monotonic: float | None = None,
 ) -> tuple[ScanResult, list[ScannerExecution]]:
     """Run or load scanner outputs and return a scan result."""
 
@@ -55,7 +57,13 @@ def run_scan(
         if checkov_json is not None:
             executions.append(checkov.from_file(checkov_json, config.repository_path))
         else:
-            executions.append(checkov.run(config.repository_path, timeout_seconds=timeout_seconds))
+            executions.append(
+                checkov.run(
+                    config.repository_path,
+                    timeout_seconds=_scanner_timeout(timeout_seconds, deadline_monotonic),
+                )
+            )
+        _raise_if_deadline_elapsed(deadline_monotonic)
     else:
         executions.append(
             ScannerExecution(
@@ -70,7 +78,13 @@ def run_scan(
         if trivy_json is not None:
             executions.append(trivy.from_file(trivy_json, config.repository_path))
         else:
-            executions.append(trivy.run(config.repository_path, timeout_seconds=timeout_seconds))
+            executions.append(
+                trivy.run(
+                    config.repository_path,
+                    timeout_seconds=_scanner_timeout(timeout_seconds, deadline_monotonic),
+                )
+            )
+        _raise_if_deadline_elapsed(deadline_monotonic)
     else:
         executions.append(
             ScannerExecution(
@@ -191,6 +205,20 @@ def build_scan_summary(
 
 def _sum_diagnostics(diagnostics: list[dict[str, int]], key: str) -> int:
     return sum(value.get(key, 0) for value in diagnostics)
+
+
+def _scanner_timeout(default_timeout: int, deadline_monotonic: float | None) -> int:
+    if deadline_monotonic is None:
+        return default_timeout
+    remaining = int(deadline_monotonic - time.monotonic())
+    if remaining < 1:
+        raise TimeoutError("scan timed out")
+    return max(1, min(default_timeout, remaining))
+
+
+def _raise_if_deadline_elapsed(deadline_monotonic: float | None) -> None:
+    if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+        raise TimeoutError("scan timed out")
 
 
 def _scanner_applicable(scanner: str, repository_path: Path) -> bool:

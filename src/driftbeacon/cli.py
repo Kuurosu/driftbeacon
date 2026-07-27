@@ -20,7 +20,7 @@ from .scan import run_scan
 from .scanners import ScannerExecution
 from .slack import send_slack_report_from_path
 from .storage import LocalStorage, StorageError
-from .web import WebConfig, run_web_server
+from .web import WebConfig, cleanup_web_storage, run_web_server
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -60,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version="driftbeacon 0.1.0")
     subparsers = parser.add_subparsers(
         dest="command",
-        metavar="{scan,report,compare,send-slack,run,web,analyse-repo,analyse}",
+        metavar="{scan,report,compare,send-slack,run,web,web-cleanup,analyse-repo,analyse}",
         required=True,
     )
 
@@ -133,6 +133,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Git clone timeout in seconds.",
     )
 
+    cleanup_parser = subparsers.add_parser(
+        "web-cleanup",
+        help="Expire old public web reports and clean abandoned web work directories.",
+    )
+    cleanup_parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path(".driftbeacon"),
+        help="Base directory for web SQLite, reports and work state.",
+    )
+
     analyse_repo_parser = subparsers.add_parser(
         "analyse-repo",
         help="Clone and analyse one public Git repository.",
@@ -170,6 +181,8 @@ def _dispatch(args: argparse.Namespace) -> int:
         return command_run(args)
     if command == "web":
         return command_web(args)
+    if command == "web-cleanup":
+        return command_web_cleanup(args)
     if command == "analyse-repo":
         return command_analyse_repo(args)
     if command == "analyse":
@@ -265,24 +278,46 @@ def command_send_slack(args: argparse.Namespace) -> int:
 
 
 def command_web(args: argparse.Namespace) -> int:
-    base = WebConfig.from_environment()
-    config = WebConfig(
-        output_dir=Path(args.output_dir),
-        max_concurrent_scans=int(args.max_concurrent_scans),
-        scanner_timeout_seconds=int(args.scanner_timeout),
-        clone_timeout_seconds=int(args.clone_timeout),
-        scan_retention_seconds=base.scan_retention_seconds,
-        scans_per_hour=base.scans_per_hour,
-        max_repository_files=base.max_repository_files,
-        max_repository_bytes=base.max_repository_bytes,
-        top_findings=base.top_findings,
-    ).validate()
+    config = _web_config_from_args(args)
     run_web_server(
         str(args.host),
         int(args.port),
         config,
     )
     return 0
+
+
+def command_web_cleanup(args: argparse.Namespace) -> int:
+    result = cleanup_web_storage(_web_config_from_args(args))
+    print("DriftBeacon web cleanup complete.")
+    for key, value in result.items():
+        print(f"{key}: {value}")
+    return 0
+
+
+def _web_config_from_args(args: argparse.Namespace) -> WebConfig:
+    base = WebConfig.from_environment()
+    output_dir = Path(args.output_dir)
+    return WebConfig(
+        output_dir=output_dir,
+        database_path=Path(
+            os.environ.get("DRIFTBEACON_WEB_DATABASE", str(output_dir / "web.sqlite3"))
+        ),
+        report_dir=Path(
+            os.environ.get("DRIFTBEACON_WEB_REPORT_DIR", str(output_dir / "reports"))
+        ),
+        working_dir=Path(os.environ.get("DRIFTBEACON_WEB_WORK_DIR", str(output_dir / "work"))),
+        max_concurrent_scans=int(getattr(args, "max_concurrent_scans", base.max_concurrent_scans)),
+        max_queued_scans=base.max_queued_scans,
+        max_scan_seconds=base.max_scan_seconds,
+        scanner_timeout_seconds=int(getattr(args, "scanner_timeout", base.scanner_timeout_seconds)),
+        clone_timeout_seconds=int(getattr(args, "clone_timeout", base.clone_timeout_seconds)),
+        retention_days=base.retention_days,
+        scans_per_hour=base.scans_per_hour,
+        max_repository_files=base.max_repository_files,
+        max_repository_bytes=base.max_repository_bytes,
+        top_findings=base.top_findings,
+    ).validate()
 
 
 def command_analyse_repo(args: argparse.Namespace) -> int:

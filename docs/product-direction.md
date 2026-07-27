@@ -157,7 +157,11 @@ Implemented in this phase:
 - background scan execution;
 - structured status polling;
 - Production Health-first web report;
-- report artifacts and JSON state;
+- SQLite-backed scan metadata;
+- shareable report URLs that survive process restarts until expiry;
+- filesystem-backed structured report JSON and Markdown downloads;
+- retention cleanup with expired-report tombstones;
+- startup recovery for interrupted queued or running scans;
 - no-op analytics boundary;
 - configurable scan limits.
 
@@ -176,3 +180,9 @@ Explicitly out of scope:
 - AI assistant;
 - benchmarking;
 - SSO or enterprise deployment.
+
+Deployment notes:
+
+- The current web persistence model is intended for local development, a single-instance public demo and controlled early public testing.
+- Do not run multiple web instances against the same local SQLite database and filesystem report directory.
+- This model is not high availability and is not designed for large-scale untrusted scanning.

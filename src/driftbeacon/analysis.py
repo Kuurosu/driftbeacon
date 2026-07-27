@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
 from collections import Counter, defaultdict
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -556,22 +559,55 @@ def clone_repository(git_url: str, clone_path: Path, *, timeout_seconds: int) ->
     """Clone a repository into a temporary directory."""
 
     clone_path.parent.mkdir(parents=True, exist_ok=True)
-    command = ["git", "clone", "--depth", "1", "--quiet", git_url, str(clone_path)]
+    command = [
+        "git",
+        "-c",
+        "protocol.version=2",
+        "clone",
+        "--depth",
+        "1",
+        "--single-branch",
+        "--no-tags",
+        "--filter=blob:none",
+        "--quiet",
+        git_url,
+        str(clone_path),
+    ]
+    env = {
+        **os.environ,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ASKPASS": "true",
+    }
+    process: subprocess.Popen[str] | None = None
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             command,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout_seconds,
-            check=False,
+            env=env,
+            start_new_session=True,
         )
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired as exc:
+        if process is not None:
+            _terminate_process_group(process)
         raise ValueError(f"git clone timed out after {timeout_seconds}s") from exc
     except OSError as exc:
         raise ValueError(f"git clone could not start: {exc}") from exc
-    if completed.returncode != 0:
-        message = completed.stderr.strip() or completed.stdout.strip() or "unknown git error"
+    if process.returncode != 0:
+        message = stderr.strip() or stdout.strip() or "unknown git error"
         raise ValueError(f"git clone failed: {truncate(redact_secrets(message), 260)}")
+
+
+def _terminate_process_group(process: subprocess.Popen[str]) -> None:
+    with suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGTERM)
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
 
 
 def _scanner_applicable(scanner: str, repository_path: Path) -> bool:

@@ -50,3 +50,16 @@ def test_web_parser_accepts_local_server_options() -> None:
     assert args.port == 9090
     assert args.output_dir == Path(".driftbeacon-web-test")
     assert args.max_concurrent_scans == 1
+
+
+def test_web_cleanup_parser_accepts_output_dir() -> None:
+    args = build_parser().parse_args(
+        [
+            "web-cleanup",
+            "--output-dir",
+            ".driftbeacon-web-test",
+        ]
+    )
+
+    assert args.command == "web-cleanup"
+    assert args.output_dir == Path(".driftbeacon-web-test")

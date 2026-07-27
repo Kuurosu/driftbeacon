@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import os
 import re
 import shutil
@@ -15,8 +16,9 @@ import time
 import uuid
 from collections import defaultdict
 from collections.abc import Callable, Iterable
+from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import parse_qs, urlparse
@@ -31,25 +33,50 @@ from .prioritise import prioritise_findings
 from .redaction import redact_secrets
 from .reporting import generate_report, prioritised_finding_details
 from .scanners.base import safe_walk
-from .storage import LocalStorage
+from .storage import StorageError
+from .web_storage import (
+    WEB_REPORT_FORMAT_VERSION,
+    FileReportStore,
+    ScanStatus,
+    SQLiteScanStore,
+    StoredReport,
+    WebScanState,
+    valid_scan_id,
+)
 
-ScanStatus = Literal["queued", "cloning", "scanning", "rendering", "completed", "failed"]
+WebErrorCode = Literal[
+    "invalid_repository_url",
+    "repository_not_found",
+    "repository_private",
+    "repository_too_large",
+    "repository_file_limit_exceeded",
+    "clone_timeout",
+    "scan_timeout",
+    "scanner_failure",
+    "capacity_reached",
+    "report_generation_failed",
+    "scan_interrupted",
+]
 AnalyticsProperties = dict[str, str | int | float | bool | None]
-AnalyticsRecorder = Callable[[str, AnalyticsProperties], None]
 
 _GITHUB_OWNER_REPO = re.compile(r"^[A-Za-z0-9_.-]+$")
-_SCAN_ID = re.compile(r"^[a-f0-9]{12}$")
+_LOGGER = logging.getLogger("driftbeacon.web")
 
 
 @dataclass(frozen=True, slots=True)
 class WebConfig:
     """Configuration for the public web scan MVP."""
 
-    output_dir: Path = Path(".driftbeacon-web")
+    output_dir: Path = Path(".driftbeacon")
+    database_path: Path = Path(".driftbeacon/web.sqlite3")
+    report_dir: Path = Path(".driftbeacon/reports")
+    working_dir: Path = Path(".driftbeacon/work")
     max_concurrent_scans: int = 2
+    max_queued_scans: int = 10
+    max_scan_seconds: int = 300
     scanner_timeout_seconds: int = 300
     clone_timeout_seconds: int = 120
-    scan_retention_seconds: int = 86_400
+    retention_days: int = 7
     scans_per_hour: int = 10
     max_repository_files: int = 8_000
     max_repository_bytes: int = 150 * 1024 * 1024
@@ -58,12 +85,23 @@ class WebConfig:
     @classmethod
     def from_environment(cls, env: dict[str, str] | None = None) -> WebConfig:
         source = env or dict(os.environ)
+        output_dir = Path(source.get("DRIFTBEACON_WEB_OUTPUT_DIR", ".driftbeacon"))
+        max_scan_seconds = _env_int(source, "DRIFTBEACON_WEB_MAX_SCAN_SECONDS", 300)
         return cls(
-            output_dir=Path(source.get("DRIFTBEACON_WEB_OUTPUT_DIR", ".driftbeacon-web")),
+            output_dir=output_dir,
+            database_path=Path(source.get("DRIFTBEACON_WEB_DATABASE", str(output_dir / "web.sqlite3"))),
+            report_dir=Path(source.get("DRIFTBEACON_WEB_REPORT_DIR", str(output_dir / "reports"))),
+            working_dir=Path(source.get("DRIFTBEACON_WEB_WORK_DIR", str(output_dir / "work"))),
             max_concurrent_scans=_env_int(source, "DRIFTBEACON_WEB_MAX_CONCURRENT_SCANS", 2),
-            scanner_timeout_seconds=_env_int(source, "DRIFTBEACON_WEB_SCANNER_TIMEOUT", 300),
+            max_queued_scans=_env_int(source, "DRIFTBEACON_WEB_MAX_QUEUED_SCANS", 10),
+            max_scan_seconds=max_scan_seconds,
+            scanner_timeout_seconds=_env_int(
+                source,
+                "DRIFTBEACON_WEB_SCANNER_TIMEOUT",
+                max_scan_seconds,
+            ),
             clone_timeout_seconds=_env_int(source, "DRIFTBEACON_WEB_CLONE_TIMEOUT", 120),
-            scan_retention_seconds=_env_int(source, "DRIFTBEACON_WEB_RETENTION_SECONDS", 86_400),
+            retention_days=_env_int(source, "DRIFTBEACON_WEB_RETENTION_DAYS", 7),
             scans_per_hour=_env_int(source, "DRIFTBEACON_WEB_SCANS_PER_HOUR", 10),
             max_repository_files=_env_int(source, "DRIFTBEACON_WEB_MAX_REPOSITORY_FILES", 8_000),
             max_repository_bytes=_env_int(
@@ -77,10 +115,16 @@ class WebConfig:
     def validate(self) -> WebConfig:
         if self.max_concurrent_scans < 1:
             raise ValueError("web max_concurrent_scans must be at least 1")
-        if self.scanner_timeout_seconds < 1 or self.clone_timeout_seconds < 1:
+        if self.max_queued_scans < 0:
+            raise ValueError("web max_queued_scans must be at least 0")
+        if (
+            self.max_scan_seconds < 1
+            or self.scanner_timeout_seconds < 1
+            or self.clone_timeout_seconds < 1
+        ):
             raise ValueError("web timeouts must be at least 1 second")
-        if self.scan_retention_seconds < 60:
-            raise ValueError("web scan_retention_seconds must be at least 60")
+        if self.retention_days < 1:
+            raise ValueError("web retention_days must be at least 1")
         if self.scans_per_hour < 1:
             raise ValueError("web scans_per_hour must be at least 1")
         if self.max_repository_files < 1:
@@ -91,58 +135,14 @@ class WebConfig:
             raise ValueError("web top_findings must be at least 1")
         if self.output_dir.exists() and self.output_dir.is_symlink():
             raise ValueError("web output_dir must not be a symlink")
+        for path_name, path in (
+            ("database_path", self.database_path),
+            ("report_dir", self.report_dir),
+            ("working_dir", self.working_dir),
+        ):
+            if path.exists() and path.is_symlink():
+                raise ValueError(f"web {path_name} must not be a symlink")
         return self
-
-
-@dataclass(slots=True)
-class WebScanState:
-    """In-memory and serializable status for one public web scan."""
-
-    scan_id: str
-    repository_url: str
-    status: ScanStatus
-    message: str
-    progress: int
-    created_at: datetime
-    updated_at: datetime
-    client_id: str
-    repository: str | None = None
-    branch: str | None = None
-    commit_sha: str | None = None
-    report_path: Path | None = None
-    scan_path: Path | None = None
-    comparison_path: Path | None = None
-    web_report_path: Path | None = None
-    error: str | None = None
-
-    @property
-    def done(self) -> bool:
-        return self.status in {"completed", "failed"}
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "scan_id": self.scan_id,
-            "repository_url": self.repository_url,
-            "status": self.status,
-            "message": self.message,
-            "progress": self.progress,
-            "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
-            "repository": self.repository,
-            "branch": self.branch,
-            "commit_sha": self.commit_sha,
-            "report_url": f"/scans/{self.scan_id}" if self.status == "completed" else None,
-            "markdown_url": f"/scans/{self.scan_id}/report.md"
-            if self.report_path is not None
-            else None,
-            "json_url": f"/scans/{self.scan_id}/current-scan.json"
-            if self.scan_path is not None
-            else None,
-            "comparison_url": f"/scans/{self.scan_id}/comparison-summary.json"
-            if self.comparison_path is not None
-            else None,
-            "error": self.error,
-        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,10 +152,14 @@ class WebScanArtifacts:
     repository: str
     branch: str
     commit_sha: str
-    report_path: Path
-    scan_path: Path
-    comparison_path: Path
-    web_report_path: Path
+    report_reference: str
+    report_format_version: str = WEB_REPORT_FORMAT_VERSION
+    overall_health: int | None = None
+    overall_grade: str | None = None
+    production_health: int | None = None
+    production_grade: str | None = None
+    coverage_status: str | None = None
+    baseline_type: str | None = None
 
 
 class NoOpAnalytics:
@@ -175,8 +179,67 @@ class PublicGitHubRepositoryProvider:
         clone_repository(repository_url, clone_path, timeout_seconds=timeout_seconds)
 
 
+class WebSubmissionError(ValueError):
+    """Safe rejection raised before a scan is persisted."""
+
+    def __init__(
+        self,
+        error_code: WebErrorCode,
+        safe_message: str,
+        *,
+        http_status: str = "400 Bad Request",
+    ) -> None:
+        super().__init__(safe_message)
+        self.error_code = error_code
+        self.safe_message = safe_message
+        self.http_status = http_status
+
+
+class WebScanFailure(RuntimeError):
+    """Safe terminal failure for a persisted scan."""
+
+    def __init__(
+        self,
+        error_code: WebErrorCode,
+        safe_message: str,
+        *,
+        detail: str | None = None,
+    ) -> None:
+        super().__init__(safe_message)
+        self.error_code = error_code
+        self.safe_message = safe_message
+        self.detail = detail
+
+
+class ScanDeadline:
+    """Wall-clock timeout boundary for one web scan."""
+
+    def __init__(self, max_seconds: int) -> None:
+        self.deadline_monotonic = time.monotonic() + max_seconds
+
+    def remaining_seconds(self) -> int:
+        remaining = int(self.deadline_monotonic - time.monotonic())
+        if remaining < 1:
+            raise WebScanFailure(
+                "scan_timeout",
+                "This scan exceeded the public demo time limit.",
+            )
+        return remaining
+
+    def ensure_remaining(self) -> None:
+        self.remaining_seconds()
+
+
 ScanRunner = Callable[
-    [str, str, Path, WebConfig, PublicGitHubRepositoryProvider, Callable[[ScanStatus, str, int], None]],
+    [
+        str,
+        str,
+        Path,
+        WebConfig,
+        PublicGitHubRepositoryProvider,
+        FileReportStore,
+        Callable[[ScanStatus, str, int], None],
+    ],
     WebScanArtifacts,
 ]
 
@@ -192,32 +255,53 @@ class WebScanService:
         provider: PublicGitHubRepositoryProvider | None = None,
         runner: ScanRunner | None = None,
         synchronous: bool = False,
+        recover_interrupted: bool = True,
+        cleanup_on_start: bool = True,
     ) -> None:
         self.config = (config or WebConfig.from_environment()).validate()
         self.output_dir = self.config.output_dir.expanduser().resolve()
         self.output_dir.mkdir(parents=True, exist_ok=True)
         if self.output_dir.is_symlink():
             raise ValueError("web output_dir must not be a symlink")
-        self.scan_root = self.output_dir / "scans"
-        self.scan_root.mkdir(parents=True, exist_ok=True)
+        self.working_dir = self.config.working_dir.expanduser().resolve()
+        self.working_dir.mkdir(parents=True, exist_ok=True)
+        if self.working_dir.is_symlink():
+            raise ValueError("web working_dir must not be a symlink")
+        self.store = SQLiteScanStore(self.config.database_path)
+        self.report_store = FileReportStore(self.config.report_dir)
         self.analytics = analytics or NoOpAnalytics()
         self.provider = provider or PublicGitHubRepositoryProvider()
         self.runner = runner or run_public_repository_scan
         self.synchronous = synchronous
-        self._lock = threading.Lock()
-        self._scans: dict[str, WebScanState] = {}
         self._submissions: dict[str, list[float]] = defaultdict(list)
         self._semaphore = threading.BoundedSemaphore(self.config.max_concurrent_scans)
+        if recover_interrupted:
+            self.mark_abandoned_scans_interrupted()
+        if cleanup_on_start:
+            self.cleanup_expired_scans()
 
     def submit(self, repository_url: str, *, client_id: str = "anonymous") -> WebScanState:
-        normalised_url = self.provider.normalise_url(repository_url)
+        try:
+            normalised_url = self.provider.normalise_url(repository_url)
+        except ValueError as exc:
+            raise WebSubmissionError("invalid_repository_url", str(exc)) from exc
         self._enforce_rate_limit(client_id)
-        self.cleanup_old_scans()
-        scan_id = uuid.uuid4().hex[:12]
+        self.cleanup_expired_scans()
+        if self.store.count_queued_scans() >= self.config.max_queued_scans:
+            self.analytics.record("scan_rejected", {"reason": "capacity_reached"})
+            raise WebSubmissionError(
+                "capacity_reached",
+                "The public demo is currently at capacity. Please try again later.",
+                http_status="503 Service Unavailable",
+            )
+        owner, repo = _repository_parts(normalised_url)
+        scan_id = uuid.uuid4().hex
         now = datetime.now(UTC)
         state = WebScanState(
             scan_id=scan_id,
             repository_url=normalised_url,
+            repository_owner=owner,
+            repository_name=repo,
             status="queued",
             message="Queued for analysis.",
             progress=5,
@@ -225,8 +309,8 @@ class WebScanService:
             updated_at=now,
             client_id=client_id,
         )
-        with self._lock:
-            self._scans[scan_id] = state
+        self.store.create_scan(state)
+        _log_scan(scan_id, normalised_url, "queued", "created")
         self.analytics.record("scan_submitted", {"scan_id": scan_id})
         if self.synchronous:
             self._run(scan_id, normalised_url)
@@ -241,31 +325,78 @@ class WebScanService:
         return self.get(scan_id) or state
 
     def get(self, scan_id: str) -> WebScanState | None:
-        if not _SCAN_ID.match(scan_id):
+        if not valid_scan_id(scan_id):
             return None
-        with self._lock:
-            return self._scans.get(scan_id)
+        return self.store.get_scan(scan_id)
 
     def cleanup_old_scans(self) -> None:
-        cutoff = time.time() - self.config.scan_retention_seconds
-        for path in self.scan_root.iterdir() if self.scan_root.exists() else []:
+        self.cleanup_expired_scans()
+
+    def cleanup_expired_scans(self) -> dict[str, int]:
+        now = datetime.now(UTC)
+        cleaned_reports = 0
+        expired_records = 0
+        failures = 0
+        for state in self.store.list_expired_scans(now):
             try:
-                if not path.is_dir() or path.is_symlink() or path.stat().st_mtime >= cutoff:
-                    continue
-                shutil.rmtree(path, ignore_errors=True)
-            except OSError:
-                continue
+                with suppress(StorageError, FileNotFoundError):
+                    self.report_store.delete(state.scan_id)
+                    cleaned_reports += 1
+                self.store.mark_expired(state.scan_id, now=now)
+                expired_records += 1
+                _log_scan(state.scan_id, state.repository_url, "expired", "cleanup")
+            except Exception as exc:
+                failures += 1
+                _LOGGER.warning(
+                    "scan_id=%s repository=%s cleanup=failed error=%s",
+                    state.scan_id,
+                    state.repository_url,
+                    redact_secrets(str(exc)),
+                )
+        cleaned_workdirs = self._cleanup_abandoned_working_dirs(now)
+        return {
+            "expired_records": expired_records,
+            "cleaned_reports": cleaned_reports,
+            "cleaned_workdirs": cleaned_workdirs,
+            "failures": failures,
+        }
+
+    def mark_abandoned_scans_interrupted(self) -> int:
+        now = datetime.now(UTC)
+        interrupted = self.store.mark_interrupted_scans(
+            now=now,
+            expires_at=self._expiry_from(now),
+        )
+        if interrupted:
+            _LOGGER.info("interrupted_scans=%s status=startup_recovered", interrupted)
+        return interrupted
+
+    def load_report(self, scan_id: str) -> StoredReport | None:
+        state = self.get(scan_id)
+        if state is None or state.status != "completed" or state.report_reference is None:
+            return None
+        return self.report_store.load(scan_id)
 
     def _run(self, scan_id: str, repository_url: str) -> None:
+        started_at = datetime.now(UTC)
         with self._semaphore:
+            self._update(
+                scan_id,
+                "cloning",
+                "Cloning public GitHub repository.",
+                15,
+                started_at=started_at,
+            )
+            _log_scan(scan_id, repository_url, "started", "worker")
             try:
                 self.analytics.record("scan_started", {"scan_id": scan_id})
                 artifacts = self.runner(
                     scan_id,
                     repository_url,
-                    self.scan_root / scan_id,
+                    self.working_dir / scan_id,
                     self.config,
                     self.provider,
+                    self.report_store,
                     lambda status, message, progress: self._update(
                         scan_id,
                         status,
@@ -273,30 +404,71 @@ class WebScanService:
                         progress,
                     ),
                 )
-            except Exception as exc:
+            except WebScanFailure as exc:
+                completed_at = datetime.now(UTC)
                 self._update(
                     scan_id,
                     "failed",
-                    "Scan failed.",
+                    exc.safe_message,
                     100,
-                    error=redact_secrets(str(exc)),
+                    completed_at=completed_at,
+                    expires_at=self._expiry_from(completed_at),
+                    error_code=exc.error_code,
+                    safe_error_message=exc.safe_message,
                 )
                 self.analytics.record("scan_failed", {"scan_id": scan_id})
+                _log_scan(scan_id, repository_url, "failed", exc.error_code)
+                if exc.detail:
+                    _LOGGER.info(
+                        "scan_id=%s repository=%s detail=%s",
+                        scan_id,
+                        repository_url,
+                        redact_secrets(exc.detail),
+                    )
+                self._delete_workdir(scan_id)
                 return
-            self._update(
+            except Exception as exc:
+                completed_at = datetime.now(UTC)
+                safe = "Scan failed. Please try again with a smaller public repository."
+                self._update(
+                    scan_id,
+                    "failed",
+                    safe,
+                    100,
+                    completed_at=completed_at,
+                    expires_at=self._expiry_from(completed_at),
+                    error_code="scanner_failure",
+                    safe_error_message=safe,
+                )
+                self.analytics.record("scan_failed", {"scan_id": scan_id})
+                _LOGGER.exception(
+                    "scan_id=%s repository=%s status=failed code=scanner_failure detail=%s",
+                    scan_id,
+                    repository_url,
+                    redact_secrets(str(exc)),
+                )
+                self._delete_workdir(scan_id)
+                return
+            completed_at = datetime.now(UTC)
+            self.store.save_report(
                 scan_id,
-                "completed",
-                "Report ready.",
-                100,
                 repository=artifacts.repository,
                 branch=artifacts.branch,
                 commit_sha=artifacts.commit_sha,
-                report_path=artifacts.report_path,
-                scan_path=artifacts.scan_path,
-                comparison_path=artifacts.comparison_path,
-                web_report_path=artifacts.web_report_path,
+                report_reference=artifacts.report_reference,
+                report_format_version=artifacts.report_format_version,
+                completed_at=completed_at,
+                expires_at=self._expiry_from(completed_at),
+                overall_health=artifacts.overall_health,
+                overall_grade=artifacts.overall_grade,
+                production_health=artifacts.production_health,
+                production_grade=artifacts.production_grade,
+                coverage_status=artifacts.coverage_status,
+                baseline_type=artifacts.baseline_type,
             )
             self.analytics.record("scan_completed", {"scan_id": scan_id})
+            _log_scan(scan_id, repository_url, "completed", "report_ready")
+            self._delete_workdir(scan_id)
 
     def _update(
         self,
@@ -305,29 +477,23 @@ class WebScanService:
         message: str,
         progress: int,
         *,
-        repository: str | None = None,
-        branch: str | None = None,
-        commit_sha: str | None = None,
-        report_path: Path | None = None,
-        scan_path: Path | None = None,
-        comparison_path: Path | None = None,
-        web_report_path: Path | None = None,
-        error: str | None = None,
+        started_at: datetime | None = None,
+        completed_at: datetime | None = None,
+        expires_at: datetime | None = None,
+        error_code: WebErrorCode | None = None,
+        safe_error_message: str | None = None,
     ) -> None:
-        with self._lock:
-            state = self._scans[scan_id]
-            state.status = status
-            state.message = message
-            state.progress = max(0, min(100, progress))
-            state.updated_at = datetime.now(UTC)
-            state.repository = repository or state.repository
-            state.branch = branch or state.branch
-            state.commit_sha = commit_sha or state.commit_sha
-            state.report_path = report_path or state.report_path
-            state.scan_path = scan_path or state.scan_path
-            state.comparison_path = comparison_path or state.comparison_path
-            state.web_report_path = web_report_path or state.web_report_path
-            state.error = error or state.error
+        self.store.update_status(
+            scan_id,
+            status,
+            message,
+            progress,
+            started_at=started_at,
+            completed_at=completed_at,
+            expires_at=expires_at,
+            error_code=error_code,
+            safe_error_message=safe_error_message,
+        )
 
     def _enforce_rate_limit(self, client_id: str) -> None:
         now = time.time()
@@ -337,9 +503,40 @@ class WebScanService:
         ]
         if len(submissions) >= self.config.scans_per_hour:
             self.analytics.record("scan_rejected", {"reason": "rate_limit"})
-            raise ValueError("Too many scans from this client. Please try again later.")
+            raise WebSubmissionError(
+                "capacity_reached",
+                "Too many scans from this client. Please try again later.",
+                http_status="429 Too Many Requests",
+            )
         submissions.append(now)
         self._submissions[client_id] = submissions
+
+    def _expiry_from(self, value: datetime) -> datetime:
+        return value + timedelta(days=self.config.retention_days)
+
+    def _cleanup_abandoned_working_dirs(self, now: datetime) -> int:
+        cutoff = now.timestamp() - max(self.config.max_scan_seconds, 60)
+        cleaned = 0
+        for path in self.working_dir.iterdir() if self.working_dir.exists() else []:
+            try:
+                if not path.is_dir() or path.is_symlink() or path.stat().st_mtime >= cutoff:
+                    continue
+                shutil.rmtree(path)
+                cleaned += 1
+            except OSError as exc:
+                _LOGGER.warning(
+                    "working_dir=%s cleanup=failed error=%s",
+                    path.name,
+                    redact_secrets(str(exc)),
+                )
+        return cleaned
+
+    def _delete_workdir(self, scan_id: str) -> None:
+        if not valid_scan_id(scan_id):
+            return
+        path = self.working_dir / scan_id
+        if path.exists() and not path.is_symlink():
+            shutil.rmtree(path, ignore_errors=True)
 
 
 class DriftBeaconWebApp:
@@ -365,8 +562,21 @@ class DriftBeaconWebApp:
                 return self._api_scan(path, start_response)
             if method == "GET" and path.startswith("/scans/"):
                 return self._scan_page(path, start_response)
+        except WebSubmissionError as exc:
+            return self._html(
+                start_response,
+                render_home_page(error=exc.safe_message),
+                status=exc.http_status,
+            )
         except ValueError as exc:
             return self._html(start_response, render_home_page(error=str(exc)), status="400 Bad Request")
+        except StorageError:
+            _LOGGER.exception("web_storage_error=true path=%s", path)
+            return self._html(
+                start_response,
+                render_error_page("DriftBeacon could not load this report."),
+                status="500 Internal Server Error",
+            )
         return self._html(start_response, render_not_found_page(), status="404 Not Found")
 
     def _submit(
@@ -383,6 +593,13 @@ class DriftBeaconWebApp:
         client_id = str(environ.get("REMOTE_ADDR") or "anonymous")
         try:
             state = self.service.submit(repository_url, client_id=client_id)
+        except WebSubmissionError as exc:
+            self.service.analytics.record("scan_rejected", {"reason": exc.error_code})
+            return self._html(
+                start_response,
+                render_home_page(error=exc.safe_message, repository_url=repository_url),
+                status=exc.http_status,
+            )
         except ValueError as exc:
             self.service.analytics.record("scan_rejected", {"reason": "validation"})
             return self._html(
@@ -399,6 +616,9 @@ class DriftBeaconWebApp:
         if state is None:
             start_response("404 Not Found", [("Content-Type", "application/json")])
             return [b'{"error":"scan not found"}']
+        if state.status == "expired":
+            start_response("410 Gone", [("Content-Type", "application/json")])
+            return [b'{"error":"scan expired"}']
         payload = json.dumps(state.to_dict(), sort_keys=True).encode("utf-8")
         start_response(
             "200 OK",
@@ -417,13 +637,27 @@ class DriftBeaconWebApp:
         state = self.service.get(scan_id)
         if state is None:
             return self._html(start_response, render_not_found_page(), status="404 Not Found")
+        if state.status == "expired":
+            return self._html(
+                start_response,
+                render_expired_report_page(state),
+                status="410 Gone",
+            )
         if len(parts) == 3:
             return self._artifact(parts[2], state, start_response)
         if state.status != "completed":
             return self._html(start_response, render_progress_page(state))
-        if state.web_report_path and state.web_report_path.exists():
+        stored = self.service.load_report(scan_id)
+        if stored is not None:
             self.service.analytics.record("report_viewed", {"scan_id": scan_id})
-            return self._html(start_response, state.web_report_path.read_text(encoding="utf-8"))
+            return self._html(
+                start_response,
+                render_repository_report_page(
+                    stored.scan,
+                    stored.comparison,
+                    state=state,
+                ),
+            )
         return self._html(
             start_response,
             render_error_page("The scan completed, but the web report could not be loaded."),
@@ -436,20 +670,56 @@ class DriftBeaconWebApp:
         state: WebScanState,
         start_response: StartResponse,
     ) -> Iterable[bytes]:
-        mapping = {
-            "report.md": (state.report_path, "text/markdown; charset=utf-8"),
-            "current-scan.json": (state.scan_path, "application/json; charset=utf-8"),
-            "comparison-summary.json": (
-                state.comparison_path,
-                "application/json; charset=utf-8",
-            ),
-        }
-        target, content_type = mapping.get(artifact, (None, "text/plain"))
-        if target is None or not target.exists():
+        if state.status == "expired":
+            start_response("410 Gone", [("Content-Type", "text/plain; charset=utf-8")])
+            return [b"report expired"]
+        if state.status != "completed":
+            start_response("409 Conflict", [("Content-Type", "text/plain; charset=utf-8")])
+            return [b"report is not ready"]
+        stored = self.service.load_report(state.scan_id)
+        if stored is None:
             start_response("404 Not Found", [("Content-Type", "text/plain; charset=utf-8")])
             return [b"artifact not found"]
-        start_response("200 OK", [("Content-Type", content_type)])
-        return [target.read_bytes()]
+        self.service.analytics.record(
+            "report_downloaded",
+            {"scan_id": state.scan_id, "artifact": artifact},
+        )
+        if artifact == "report.md":
+            return self._download(
+                start_response,
+                stored.markdown,
+                "text/markdown; charset=utf-8",
+                f"driftbeacon-{state.scan_id}-report.md",
+            )
+        if artifact == "report.json":
+            return self._download(
+                start_response,
+                json.dumps(stored.report_json, indent=2, sort_keys=True) + "\n",
+                "application/json; charset=utf-8",
+                f"driftbeacon-{state.scan_id}-report.json",
+            )
+        if artifact == "current-scan.json":
+            return self._download(
+                start_response,
+                json.dumps(stored.report_json.get("scan", {}), indent=2, sort_keys=True)
+                + "\n",
+                "application/json; charset=utf-8",
+                f"driftbeacon-{state.scan_id}-scan.json",
+            )
+        if artifact == "comparison-summary.json":
+            return self._download(
+                start_response,
+                json.dumps(
+                    stored.report_json.get("comparison", {}),
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                "application/json; charset=utf-8",
+                f"driftbeacon-{state.scan_id}-comparison.json",
+            )
+        start_response("404 Not Found", [("Content-Type", "text/plain; charset=utf-8")])
+        return [b"artifact not found"]
 
     def _html(
         self,
@@ -464,6 +734,25 @@ class DriftBeaconWebApp:
             [
                 ("Content-Type", "text/html; charset=utf-8"),
                 ("Content-Length", str(len(payload))),
+                ("Cache-Control", "no-store"),
+            ],
+        )
+        return [payload]
+
+    def _download(
+        self,
+        start_response: StartResponse,
+        text: str,
+        content_type: str,
+        filename: str,
+    ) -> Iterable[bytes]:
+        payload = text.encode("utf-8")
+        start_response(
+            "200 OK",
+            [
+                ("Content-Type", content_type),
+                ("Content-Length", str(len(payload))),
+                ("Content-Disposition", f'attachment; filename="{filename}"'),
                 ("Cache-Control", "no-store"),
             ],
         )
@@ -485,12 +774,24 @@ def run_web_server(host: str, port: int, config: WebConfig | None = None) -> Non
         server.serve_forever()
 
 
+def cleanup_web_storage(config: WebConfig | None = None) -> dict[str, int]:
+    """Expire old public web reports and abandoned web working directories."""
+
+    service = WebScanService(
+        config,
+        recover_interrupted=False,
+        cleanup_on_start=False,
+    )
+    return service.cleanup_expired_scans()
+
+
 def run_public_repository_scan(
     scan_id: str,
     repository_url: str,
     output_dir: Path,
     config: WebConfig,
     provider: PublicGitHubRepositoryProvider,
+    report_store: FileReportStore,
     progress: Callable[[ScanStatus, str, int], None],
 ) -> WebScanArtifacts:
     """Clone a public repository and run the shared DriftBeacon analysis engine."""
@@ -498,33 +799,56 @@ def run_public_repository_scan(
     output_dir.mkdir(parents=True, exist_ok=True)
     if output_dir.is_symlink():
         raise ValueError("scan output directory must not be a symlink")
+    deadline = ScanDeadline(config.max_scan_seconds)
     temp_root = Path(tempfile.mkdtemp(prefix="driftbeacon-web-"))
     clone_path = temp_root / "repository"
     try:
         progress("cloning", "Cloning public GitHub repository.", 20)
-        provider.clone(repository_url, clone_path, timeout_seconds=config.clone_timeout_seconds)
+        try:
+            provider.clone(
+                repository_url,
+                clone_path,
+                timeout_seconds=min(
+                    config.clone_timeout_seconds,
+                    deadline.remaining_seconds(),
+                ),
+            )
+        except ValueError as exc:
+            raise _clone_failure(exc) from exc
+        deadline.ensure_remaining()
         _enforce_repository_limits(clone_path, config)
         supported = detect_supported_infrastructure_files(clone_path)
         if not supported:
-            progress("scanning", "No supported infrastructure files found; recording coverage.", 45)
+            progress("analysing", "No supported infrastructure files found; recording coverage.", 45)
         else:
-            progress("scanning", f"Detected {len(supported)} supported files. Running scanners.", 45)
+            progress("analysing", f"Detected {len(supported)} supported files. Running scanners.", 45)
         scan_config = load_config(
             repository_path=clone_path,
             output_dir=output_dir,
             no_slack=True,
         )
-        scan, _executions = run_scan_with_engine(
-            scan_config,
-            timeout_seconds=config.scanner_timeout_seconds,
-        )
+        try:
+            scan, _executions = run_scan_with_engine(
+                scan_config,
+                timeout_seconds=min(
+                    config.scanner_timeout_seconds,
+                    deadline.remaining_seconds(),
+                ),
+                deadline_monotonic=deadline.deadline_monotonic,
+            )
+        except TimeoutError as exc:
+            raise WebScanFailure(
+                "scan_timeout",
+                "This scan exceeded the public demo time limit.",
+            ) from exc
+        deadline.ensure_remaining()
         comparison = compare_scans(scan, None)
         top_items = prioritise_findings(
             scan.findings,
             limit=config.top_findings,
             production_patterns=scan_config.production_patterns,
         )
-        progress("rendering", "Rendering report.", 85)
+        progress("generating_report", "Rendering report.", 85)
         markdown_report = generate_report(
             scan,
             comparison,
@@ -532,13 +856,15 @@ def run_public_repository_scan(
             production_patterns=scan_config.production_patterns,
             top_limit=config.top_findings,
         )
-        storage = LocalStorage(output_dir)
-        scan_path = storage.save_current_scan(scan)
-        comparison_path = storage.save_comparison(comparison.to_dict())
-        report_path = storage.save_report(markdown_report)
-        web_report_path = storage.save_report(
-            render_repository_report_page(scan, comparison),
-            filename="web-report.html",
+        deadline.ensure_remaining()
+        report_reference = report_store.save(
+            scan_id,
+            report_json={
+                "generated_at": datetime.now(UTC).isoformat(),
+                "scan": scan.to_dict(),
+                "comparison": comparison.to_dict(),
+            },
+            markdown=markdown_report,
         )
         _write_state_file(
             output_dir,
@@ -548,6 +874,7 @@ def run_public_repository_scan(
                 "repository": scan.repository,
                 "branch": scan.branch,
                 "commit_sha": scan.commit_sha,
+                "report_reference": report_reference,
                 "completed_at": datetime.now(UTC).isoformat(),
             },
         )
@@ -555,21 +882,44 @@ def run_public_repository_scan(
             repository=scan.repository,
             branch=scan.branch,
             commit_sha=scan.commit_sha,
-            report_path=report_path,
-            scan_path=scan_path,
-            comparison_path=comparison_path,
-            web_report_path=web_report_path,
+            report_reference=report_reference,
+            overall_health=scan.health_score,
+            overall_grade=_grade_for_score(scan.health_score),
+            production_health=_optional_int(scan.summary.get("production_health_score")),
+            production_grade=_optional_str(scan.summary.get("production_grade")),
+            coverage_status=_optional_str(
+                scan.summary.get("production_coverage_state")
+                or scan.summary.get("coverage_state")
+            ),
+            baseline_type=_baseline_text(comparison),
         )
+    except WebScanFailure:
+        raise
+    except StorageError as exc:
+        raise WebScanFailure(
+            "report_generation_failed",
+            "The scan completed, but DriftBeacon could not store the report.",
+            detail=str(exc),
+        ) from exc
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
-def run_scan_with_engine(scan_config: Any, *, timeout_seconds: int) -> tuple[ScanResult, list[Any]]:
+def run_scan_with_engine(
+    scan_config: Any,
+    *,
+    timeout_seconds: int,
+    deadline_monotonic: float | None = None,
+) -> tuple[ScanResult, list[Any]]:
     """Isolated import boundary for tests and future worker implementations."""
 
     from .scan import run_scan
 
-    return run_scan(scan_config, timeout_seconds=timeout_seconds)
+    return run_scan(
+        scan_config,
+        timeout_seconds=timeout_seconds,
+        deadline_monotonic=deadline_monotonic,
+    )
 
 
 def normalise_public_github_url(repository_url: str) -> str:
@@ -665,7 +1015,7 @@ def render_progress_page(state: WebScanState) -> str:
     """Render queued/running/failed scan states."""
 
     failure = (
-        f"<p class=\"alert\" role=\"alert\">{_escape(state.error or state.message)}</p>"
+        f"<p class=\"alert\" role=\"alert\">{_escape(state.safe_error_message or state.message)}</p>"
         if state.status == "failed"
         else ""
     )
@@ -679,7 +1029,7 @@ def render_progress_page(state: WebScanState) -> str:
             document.querySelector('[data-status]').textContent = data.status;
             document.querySelector('[data-message]').textContent = data.message;
             document.querySelector('progress').value = data.progress;
-            if (data.status === 'completed' || data.status === 'failed') {
+            if (data.status === 'completed' || data.status === 'failed' || data.status === 'expired') {
               window.location.reload();
             }
           }
@@ -710,7 +1060,12 @@ def render_progress_page(state: WebScanState) -> str:
     )
 
 
-def render_repository_report_page(scan: ScanResult, comparison: ComparisonSummary) -> str:
+def render_repository_report_page(
+    scan: ScanResult,
+    comparison: ComparisonSummary,
+    *,
+    state: WebScanState | None = None,
+) -> str:
     """Render a web report that emphasizes Production Health and next actions."""
 
     summary = scan.summary
@@ -731,6 +1086,8 @@ def render_repository_report_page(scan: ScanResult, comparison: ComparisonSummar
     overall_health = _score_text(scan.health_score)
     overall_grade = _grade_text(_grade_for_score(scan.health_score))
     provisional = " Provisional grade." if summary.get("production_grade_provisional") is True else ""
+    retention_notice = _retention_notice(state)
+    actions = _report_actions(state)
     return _page(
         f"DriftBeacon report for {scan.repository}",
         f"""
@@ -738,6 +1095,8 @@ def render_repository_report_page(scan: ScanResult, comparison: ComparisonSummar
           <a class="back-link" href="/">Analyse another repository</a>
           <section class="report-status">
             <h1>{_escape(scan.repository)}</h1>
+            {actions}
+            {retention_notice}
             <dl class="status-grid">
               <div><dt>Branch</dt><dd>{_escape(scan.branch)}</dd></div>
               <div><dt>Commit</dt><dd>{_escape(scan.commit_sha[:12])}</dd></div>
@@ -817,6 +1176,23 @@ def render_repository_report_page(scan: ScanResult, comparison: ComparisonSummar
     )
 
 
+def render_expired_report_page(state: WebScanState) -> str:
+    return _page(
+        "DriftBeacon report expired",
+        f"""
+        <main class="narrow">
+          <a class="back-link" href="/">Start another scan</a>
+          <section class="panel">
+            <p class="eyebrow">Expired public report</p>
+            <h1>{_escape(state.repository_label)}</h1>
+            <p>This public report has expired and its stored findings have been removed.</p>
+            <p>Run a new scan to generate a fresh report.</p>
+          </section>
+        </main>
+        """,
+    )
+
+
 def render_error_page(message: str) -> str:
     return _page("DriftBeacon error", f"<main class=\"narrow\"><p class=\"alert\">{_escape(message)}</p></main>")
 
@@ -850,6 +1226,36 @@ def _priority_card(index: int, item: Any, has_baseline: bool) -> str:
     """
 
 
+def _report_actions(state: WebScanState | None) -> str:
+    if state is None or state.status != "completed":
+        return ""
+    return f"""
+    <div class="report-actions">
+      <button type="button" data-copy-report>Copy report link</button>
+      <a class="button-link" href="/scans/{state.scan_id}/report.md">Download Markdown</a>
+      <a class="button-link secondary" href="/scans/{state.scan_id}/report.json">Download JSON</a>
+    </div>
+    <script>
+      const copyButton = document.querySelector('[data-copy-report]');
+      if (copyButton) {{
+        copyButton.addEventListener('click', async () => {{
+          await navigator.clipboard.writeText(window.location.href);
+          copyButton.textContent = 'Copied';
+        }});
+      }}
+    </script>
+    """
+
+
+def _retention_notice(state: WebScanState | None) -> str:
+    if state is None or state.expires_at is None:
+        return ""
+    return (
+        '<p class="retention-note">This public report is available until '
+        f"{_escape(_date_text(state.expires_at))}. Anyone with this link can view it.</p>"
+    )
+
+
 def _web_priority_candidates(findings: list[Finding]) -> list[Finding]:
     active = [finding for finding in findings if finding.status != "resolved"]
     production = [finding for finding in active if finding.directory_group == "production"]
@@ -859,8 +1265,10 @@ def _web_priority_candidates(findings: list[Finding]) -> list[Finding]:
 def _enforce_repository_limits(repository_path: Path, config: WebConfig) -> None:
     files = safe_walk(repository_path)
     if len(files) > config.max_repository_files:
-        raise ValueError(
-            f"repository exceeds the public MVP file limit of {config.max_repository_files}"
+        raise WebScanFailure(
+            "repository_file_limit_exceeded",
+            "This repository exceeds the file-count limit for the public demo.",
+            detail=f"repository file count {len(files)} exceeds {config.max_repository_files}",
         )
     total = 0
     for path in files:
@@ -870,12 +1278,70 @@ def _enforce_repository_limits(repository_path: Path, config: WebConfig) -> None
             continue
         if total > config.max_repository_bytes:
             limit_mb = round(config.max_repository_bytes / (1024 * 1024))
-            raise ValueError(f"repository exceeds the public MVP size limit of {limit_mb} MB")
+            raise WebScanFailure(
+                "repository_too_large",
+                "This repository exceeds the size limit for the public demo.",
+                detail=f"repository byte size exceeds {limit_mb} MB",
+            )
 
 
 def _write_state_file(output_dir: Path, data: dict[str, Any]) -> None:
     path = output_dir / "scan-state.json"
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _clone_failure(exc: ValueError) -> WebScanFailure:
+    detail = redact_secrets(str(exc))
+    lower = detail.lower()
+    if "timed out" in lower:
+        return WebScanFailure(
+            "clone_timeout",
+            "Git clone exceeded the public demo time limit.",
+            detail=detail,
+        )
+    if "authentication" in lower or "could not read username" in lower:
+        return WebScanFailure(
+            "repository_private",
+            "This repository could not be cloned. Confirm it is public and exists.",
+            detail=detail,
+        )
+    if "not found" in lower or "repository not found" in lower:
+        return WebScanFailure(
+            "repository_not_found",
+            "This repository could not be found on GitHub.",
+            detail=detail,
+        )
+    return WebScanFailure(
+        "repository_not_found",
+        "This repository could not be cloned. Confirm it is public and exists.",
+        detail=detail,
+    )
+
+
+def _repository_parts(repository_url: str) -> tuple[str, str]:
+    parsed = urlparse(repository_url)
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
+    if len(parts) != 2:
+        return "", ""
+    return parts[0], parts[1].removesuffix(".git")
+
+
+def _optional_int(value: object) -> int | None:
+    return value if isinstance(value, int) else None
+
+
+def _optional_str(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _log_scan(scan_id: str, repository: str, status: str, detail: str) -> None:
+    _LOGGER.info(
+        "scan_id=%s repository=%s status=%s detail=%s",
+        scan_id,
+        repository,
+        status,
+        detail,
+    )
 
 
 def _breakdown_rows(raw: object) -> list[tuple[str, int, int, int, int, int]]:
@@ -952,7 +1418,10 @@ def _css() -> str:
     label { display:block; font-weight:700; margin-bottom:8px; }
     .form-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; max-width:760px; }
     input { width:100%; min-height:46px; border:1px solid var(--line); border-radius:8px; padding:0 14px; font:inherit; }
-    button { min-height:46px; border:0; border-radius:8px; padding:0 18px; font-weight:800; color:#fff; background:var(--accent); cursor:pointer; }
+    button, .button-link { min-height:46px; border:0; border-radius:8px; padding:0 18px; font-weight:800; color:#fff; background:var(--accent); cursor:pointer; display:inline-flex; align-items:center; text-decoration:none; }
+    .button-link.secondary { background:#2d3a33; }
+    .report-actions { display:flex; flex-wrap:wrap; gap:10px; margin:16px 0; }
+    .retention-note { border:1px solid var(--line); border-radius:8px; padding:12px; background:#fff; color:var(--muted); }
     .band, .split, .methodology-note, .panel, .report-status, .health-focus, .impact, .evidence {
       border-top:1px solid var(--line); padding:28px 0; }
     .steps, .split, .health-focus, .evidence-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:18px; }

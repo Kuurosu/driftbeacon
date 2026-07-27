@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import time
 from contextlib import suppress
@@ -121,15 +122,17 @@ def run_subprocess(
     """Run a scanner safely with timeout and captured output."""
 
     start = time.monotonic()
+    process: subprocess.Popen[str] | None = None
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             args,
             cwd=cwd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout_seconds,
-            check=False,
+            start_new_session=True,
         )
+        stdout, stderr = process.communicate(timeout=timeout_seconds)
     except OSError as exc:
         duration = time.monotonic() - start
         message = truncate(_scrub_repository_path(redact_secrets(str(exc)), cwd), 240)
@@ -144,6 +147,11 @@ def run_subprocess(
         duration = time.monotonic() - start
         stdout = exc.stdout if isinstance(exc.stdout, str) else ""
         stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        if process is not None:
+            _terminate_process_group(process)
+            more_stdout, more_stderr = process.communicate()
+            stdout += more_stdout or ""
+            stderr += more_stderr or ""
         stderr = _scrub_repository_path(redact_secrets(stderr), cwd)
         return (
             stdout,
@@ -158,12 +166,13 @@ def run_subprocess(
             duration,
         )
     duration = time.monotonic() - start
-    stderr = _scrub_repository_path(redact_secrets(completed.stderr), cwd)
-    if completed.returncode in acceptable_exit_codes:
+    returncode = process.returncode if process is not None else None
+    stderr = _scrub_repository_path(redact_secrets(stderr), cwd)
+    if returncode in acceptable_exit_codes:
         return (
-            completed.stdout,
+            stdout,
             stderr,
-            completed.returncode,
+            returncode,
             ScannerStatus(
                 scanner,
                 "success",
@@ -173,17 +182,27 @@ def run_subprocess(
             duration,
         )
     return (
-        completed.stdout,
+        stdout,
         stderr,
-        completed.returncode,
+        returncode,
         ScannerStatus(
             scanner,
-            "partial" if completed.stdout.strip() else "failed",
-            truncate(f"scanner exited {completed.returncode}: {stderr}", 300),
+            "partial" if stdout.strip() else "failed",
+            truncate(f"scanner exited {returncode}: {stderr}", 300),
             duration,
         ),
         duration,
     )
+
+
+def _terminate_process_group(process: subprocess.Popen[str]) -> None:
+    with suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGTERM)
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
 
 
 def _scrub_repository_path(value: str, repository_path: Path) -> str:

@@ -112,6 +112,7 @@ driftbeacon compare
 driftbeacon send-slack
 driftbeacon run
 driftbeacon web
+driftbeacon web-cleanup
 driftbeacon analyse-repo
 driftbeacon analyse
 ```
@@ -144,10 +145,37 @@ Public web scan MVP:
 driftbeacon web \
   --host 127.0.0.1 \
   --port 8080 \
-  --output-dir .driftbeacon-web
+  --output-dir .driftbeacon
 ```
 
-The web MVP accepts only HTTPS public GitHub repository URLs, clones into isolated temporary directories, uses the same DriftBeacon scan engine as the CLI, exposes structured status polling, deletes temporary clones after success or failure, and stores only generated reports and JSON state under `.driftbeacon-web/`.
+The web MVP accepts only HTTPS public GitHub repository URLs, clones with a shallow Git checkout into isolated temporary directories, uses the same DriftBeacon scan engine as the CLI, exposes structured status polling, deletes temporary clones after success or failure, and persists shareable completed reports until retention expiry.
+
+Default local web storage:
+
+| Setting | Default | Environment variable |
+| --- | --- | --- |
+| SQLite scan metadata | `.driftbeacon/web.sqlite3` | `DRIFTBEACON_WEB_DATABASE` |
+| Report files | `.driftbeacon/reports/` | `DRIFTBEACON_WEB_REPORT_DIR` |
+| Temporary web work files | `.driftbeacon/work/` | `DRIFTBEACON_WEB_WORK_DIR` |
+| Concurrent scans | `2` | `DRIFTBEACON_WEB_MAX_CONCURRENT_SCANS` |
+| Queued scans | `10` | `DRIFTBEACON_WEB_MAX_QUEUED_SCANS` |
+| Total scan seconds | `300` | `DRIFTBEACON_WEB_MAX_SCAN_SECONDS` |
+| Scanner timeout seconds | `300` | `DRIFTBEACON_WEB_SCANNER_TIMEOUT` |
+| Clone timeout seconds | `120` | `DRIFTBEACON_WEB_CLONE_TIMEOUT` |
+| Repository file limit | `8000` | `DRIFTBEACON_WEB_MAX_REPOSITORY_FILES` |
+| Repository byte limit | `157286400` | `DRIFTBEACON_WEB_MAX_REPOSITORY_BYTES` |
+| Report retention | `7` days | `DRIFTBEACON_WEB_RETENTION_DAYS` |
+| Per-client scans per hour | `10` | `DRIFTBEACON_WEB_SCANS_PER_HOUR` |
+
+Completed reports are available at `/scans/<scan-id>` after process restarts until they expire. The report page includes Markdown and JSON downloads. Public report links are not private; anyone with the link can view the report during the retention window.
+
+Run retention cleanup manually:
+
+```sh
+driftbeacon web-cleanup --output-dir .driftbeacon
+```
+
+The local persistence model is suitable for local development, a single-instance demo deployment, and controlled early public testing. It is not designed for multi-instance production, high availability, or large-scale untrusted scanning.
 
 Analyse public Git repositories without manually cloning them:
 
@@ -433,10 +461,13 @@ The parser supports the documented YAML shape and fails clearly for invalid bool
 - Slack webhook URLs are read only from environment variables.
 - Webhook URLs and obvious secrets are redacted from scanner text and Slack payloads.
 - The public web MVP accepts only HTTPS GitHub repository URLs and rejects credentials, query strings, fragments and non-GitHub hosts.
-- Web scans clone repositories into isolated temporary directories and delete temporary clones after success or failure.
-- Web scan concurrency, rate limits, clone timeouts, scanner timeouts, repository file limits and repository size limits are configurable.
+- Web scans use shallow Git clones, disable interactive credential prompts, clone into isolated temporary directories and delete temporary clones after success or failure.
+- Web scan metadata is stored in SQLite and generated reports are stored by scan ID, not by repository path.
+- Public web report links are shareable, not private. Anyone with a report link can view it until retention expiry.
+- Expired reports are tombstoned with a `410 Gone` page and full report JSON/Markdown files are removed.
+- Web scan concurrency, queue limits, rate limits, total scan timeouts, clone timeouts, scanner timeouts, repository file limits and repository size limits are configurable.
 - Scanner subprocesses use argument arrays, not shell strings.
-- Scanner execution uses timeouts.
+- Scanner and clone subprocesses use timeouts and process-group termination.
 - Repository walking does not follow symlinks and skips generated directories.
 - driftbeacon refuses symlinked scan/config output paths where practical.
 - GitHub workflows use read-only repository permissions.
@@ -448,6 +479,8 @@ Limitations:
 - Redaction is best effort and cannot guarantee detection of every secret format.
 - Checkov and Trivy are external tools. Their coverage and false positives are inherited.
 - GitHub Actions cache is not permanent historical storage.
+- The public web MVP uses single-process local SQLite/filesystem persistence. Do not run multiple web instances against the same local storage directory.
+- The public web MVP is not yet suitable for high-availability or large-scale untrusted scanning.
 - The MVP does not authenticate users, host dashboards, or ingest cloud accounts directly.
 
 ## Planned Future Development

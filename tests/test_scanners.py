@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from driftbeacon.models import ScannerStatus
@@ -38,6 +39,26 @@ def test_scanner_status_messages_scrub_local_repository_path(tmp_path: Path) -> 
 
     assert str(tmp_path) not in scrubbed
     assert "./terraform/main.tf" in scrubbed
+
+
+def test_run_subprocess_times_out_and_returns_safe_status(tmp_path: Path) -> None:
+    stdout, stderr, returncode, status, _duration = base_module.run_subprocess(
+        [
+            sys.executable,
+            "-c",
+            "import time; time.sleep(5)",
+        ],
+        cwd=tmp_path,
+        scanner="demo",
+        timeout_seconds=1,
+        acceptable_exit_codes={0},
+    )
+
+    assert stdout == ""
+    assert stderr == ""
+    assert returncode is None
+    assert status.status == "failed"
+    assert "timed out after 1s" in status.message
 
 
 def test_executable_path_resolves_relative_path(monkeypatch: object) -> None:

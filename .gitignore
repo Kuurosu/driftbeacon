@@ -1,4 +1,9 @@
 .driftbeacon/
+.driftbeacon-web/
+.driftbeacon/*.sqlite3
+.driftbeacon/*.sqlite3-*
+.driftbeacon/reports/
+.driftbeacon/work/
 .driftbeacon-analysis/
 .driftbeacon-demo/
 .driftbeacon-sample/
