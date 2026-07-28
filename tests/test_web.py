@@ -581,6 +581,8 @@ def test_sample_report_explains_score_divergence_and_full_explorer() -> None:
     assert 'class="footer-links"' in html
     assert "--accent:#63e6aa" in html
     assert "@keyframes beacon-flow" in html
+    assert 'class="scanner-status-card"' in html
+    assert 'class="coverage-breakdown"' in html
     assert 'class="breakdown-list"' in html
     assert 'class="metric-row"' in html
     assert 'class="metric-pill metric-critical"' in html

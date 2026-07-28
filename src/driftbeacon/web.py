@@ -2192,15 +2192,15 @@ def _scanner_coverage_section(scan: ScanResult) -> str:
       <h2 id="scanner-coverage-heading">Scanner coverage {_help_bubble("Scanner coverage", "Shows which configured scanners completed for supported file types. Partial or failed coverage means findings and scores may be incomplete.")}</h2>
       <p>{_escape(coverage)} for supported file types. {_escape(supported_text)} DriftBeacon performs static analysis only and does not execute the submitted application.</p>
       <div class="evidence-grid">
-        <article>
+        <article class="scanner-status-card">
           <h3>Scanner status</h3>
-          <ul>{scanner_rows}</ul>
+          <ul class="scanner-status-list">{scanner_rows}</ul>
         </article>
-        <article>
+        <article class="coverage-breakdown">
           <h3>Finding source breakdown</h3>
           {_breakdown_cards(source_rows, "Finding source")}
         </article>
-        <article>
+        <article class="coverage-breakdown">
           <h3>Path classification breakdown</h3>
           {_breakdown_cards(group_rows, "Path classification")}
         </article>
@@ -2889,7 +2889,6 @@ def _breakdown_cards(rows: list[tuple[str, int, int, int, int, int]], label: str
             f'<span class="metric-pill metric-high"><span>High</span><strong>{high}</strong></span>'
             f'<span class="metric-pill metric-medium"><span>Med</span><strong>{medium}</strong></span>'
             f'<span class="metric-pill metric-low"><span>Low</span><strong>{low}</strong></span>'
-            f'<span class="metric-pill metric-total-pill"><span>Total</span><strong>{total}</strong></span>'
             "</div>"
             "</li>"
         )
@@ -3077,7 +3076,7 @@ def _css() -> str:
     .band, .split, .methodology-note, .panel, .report-status, .report-section, .health-focus, .impact, .evidence, .feedback-section {
       border-top:1px solid var(--line); padding:28px 0; }
     .steps, .split, .health-focus { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:18px; }
-    .evidence-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr)); gap:18px; }
+    .evidence-grid { display:grid; grid-template-columns:1fr; gap:18px; align-items:start; }
     .split, .health-focus { grid-template-columns:1fr 1fr; }
     .report-status { position:relative; overflow:hidden; border:1px solid var(--line); border-radius:8px; padding:24px; background:
       linear-gradient(135deg, color-mix(in srgb, var(--panel) 92%, transparent), color-mix(in srgb, var(--accent) 6%, var(--panel)));
@@ -3087,21 +3086,27 @@ def _css() -> str:
     .steps article span { display:block; color:var(--muted); margin-top:6px; }
     .status-grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px; margin:18px 0 0; }
     .status-grid div { border:1px solid var(--line); border-radius:8px; padding:12px; background:var(--panel-2); }
+    .scanner-status-card { width:min(100%,330px); padding:14px; box-shadow:0 10px 30px rgba(0,0,0,.16); }
+    .scanner-status-card h3 { font-size:1rem; margin-bottom:8px; }
+    .scanner-status-list { margin:0; padding-left:1rem; color:var(--muted); font-size:.86rem; }
+    .coverage-breakdown { width:100%; }
     .breakdown-list { list-style:none; display:grid; gap:10px; margin:0; padding:0; }
-    .metric-row { border:1px solid color-mix(in srgb, var(--line) 82%, transparent); border-radius:8px; padding:10px; position:relative; overflow:hidden;
+    .metric-row { display:grid; grid-template-columns:minmax(170px,.7fr) minmax(360px,1.8fr); gap:16px; align-items:center;
+      border:1px solid color-mix(in srgb, var(--line) 82%, transparent); border-radius:8px; padding:12px 14px; position:relative; overflow:hidden;
       background:linear-gradient(135deg, color-mix(in srgb, var(--soft) 84%, transparent), color-mix(in srgb, var(--panel) 76%, transparent)); }
     .metric-row::before { content:""; position:absolute; left:0; top:10px; bottom:10px; width:2px; border-radius:999px; background:var(--accent); box-shadow:0 0 16px var(--glow); opacity:.76; }
-    .metric-row-main { display:flex; align-items:center; justify-content:space-between; gap:12px; padding-left:6px; margin-bottom:8px; }
+    .metric-row-main { display:flex; align-items:center; justify-content:space-between; gap:12px; padding-left:6px; min-width:0; }
     .metric-label { font-weight:850; color:var(--ink); overflow-wrap:normal; word-break:normal; }
     .metric-total { color:var(--accent); font-size:1.15rem; line-height:1; font-weight:950; text-shadow:0 0 16px var(--glow); }
-    .metric-pills { display:grid; grid-template-columns:repeat(4,minmax(42px,1fr)) minmax(52px,1.15fr); gap:6px; }
+    .metric-pills { display:grid; grid-template-columns:repeat(4,minmax(70px,1fr)); gap:8px; }
     .metric-pill { min-width:0; display:flex; align-items:center; justify-content:space-between; gap:5px; border:1px solid var(--line); border-radius:7px; padding:5px 6px;
       background:color-mix(in srgb, var(--panel) 82%, transparent); color:var(--muted); font-size:.74rem; font-weight:800; }
+    .metric-pill span, .metric-pill strong, .metric-label { white-space:nowrap; overflow-wrap:normal; word-break:normal; }
     .metric-pill strong { color:var(--ink); font-size:.88rem; }
     .metric-critical { border-color:color-mix(in srgb, #ff8f76 38%, var(--line)); }
     .metric-high { border-color:color-mix(in srgb, #ffd166 38%, var(--line)); }
     .metric-medium { border-color:color-mix(in srgb, #d7c174 32%, var(--line)); }
-    .metric-low, .metric-total-pill { border-color:color-mix(in srgb, var(--accent) 34%, var(--line)); }
+    .metric-low { border-color:color-mix(in srgb, var(--accent) 34%, var(--line)); }
     dd { margin:4px 0 0; font-weight:750; overflow-wrap:anywhere; }
     .step-list { list-style:none; padding:0; margin:22px 0; display:grid; gap:8px; }
     .step-list li { display:flex; justify-content:space-between; gap:12px; border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:var(--panel); }
@@ -3199,13 +3204,14 @@ def _css() -> str:
       .score { font-size:3.2rem; }
       .site-header { align-items:flex-start; gap:8px; flex-direction:column; }
       .header-actions { justify-content:space-between; width:100%; }
+      .metric-row { grid-template-columns:1fr; }
       .report-tabs { position:static; }
       .help-bubble { left:auto; right:0; transform:none; }
     }
     @media (max-width:520px) {
       body { padding-bottom:70px; }
       .brand-copy small, .header-pill { display:none; }
-      .metric-pills { grid-template-columns:repeat(3,minmax(48px,1fr)); }
+      .metric-pills { grid-template-columns:repeat(2,minmax(0,1fr)); }
     }
     """
 
