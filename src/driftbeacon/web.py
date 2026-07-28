@@ -2198,11 +2198,11 @@ def _scanner_coverage_section(scan: ScanResult) -> str:
         </article>
         <article>
           <h3>Finding source breakdown</h3>
-          {_table(source_rows, "Source")}
+          {_breakdown_cards(source_rows, "Finding source")}
         </article>
         <article>
           <h3>Path classification breakdown</h3>
-          {_table(group_rows, "Path type")}
+          {_breakdown_cards(group_rows, "Path classification")}
         </article>
       </div>
     </section>
@@ -2872,34 +2872,33 @@ def _compact_breakdown_label(name: str) -> str:
     return compact_labels.get(name, name)
 
 
-def _table(rows: list[tuple[str, int, int, int, int, int]], label: str) -> str:
+def _breakdown_cards(rows: list[tuple[str, int, int, int, int, int]], label: str) -> str:
     if not rows:
         return "<p>No findings recorded.</p>"
     body = "\n".join(
         (
-            f'<tr><td class="row-label" title="{_escape(name)}">'
-            f"{_escape(_compact_breakdown_label(name))}</td><td>{critical}</td><td>{high}</td>"
-            f"<td>{medium}</td><td>{low}</td><td>{total}</td></tr>"
+            '<li class="metric-row">'
+            '<div class="metric-row-main">'
+            f'<span class="metric-label" title="{_escape(name)}">'
+            f"{_escape(_compact_breakdown_label(name))}</span>"
+            f'<span class="metric-total" aria-label="{_escape(total)} total findings">'
+            f"{total}</span>"
+            "</div>"
+            '<div class="metric-pills" aria-label="Severity breakdown">'
+            f'<span class="metric-pill metric-critical"><span>Crit</span><strong>{critical}</strong></span>'
+            f'<span class="metric-pill metric-high"><span>High</span><strong>{high}</strong></span>'
+            f'<span class="metric-pill metric-medium"><span>Med</span><strong>{medium}</strong></span>'
+            f'<span class="metric-pill metric-low"><span>Low</span><strong>{low}</strong></span>'
+            f'<span class="metric-pill metric-total-pill"><span>Total</span><strong>{total}</strong></span>'
+            "</div>"
+            "</li>"
         )
         for name, critical, high, medium, low, total in rows
     )
-    table_label = "Path" if label == "Path type" else label
     return f"""
-    <div class="table-scroll">
-      <table class="metric-table">
-        <thead>
-          <tr>
-            <th scope="col">{_escape(table_label)}</th>
-            <th scope="col" title="Critical findings">Crit</th>
-            <th scope="col" title="High findings">High</th>
-            <th scope="col" title="Medium findings">Med</th>
-            <th scope="col" title="Low findings">Low</th>
-            <th scope="col" title="Total actionable findings">Total</th>
-          </tr>
-        </thead>
-        <tbody>{body}</tbody>
-      </table>
-    </div>
+    <ul class="breakdown-list" aria-label="{_escape(label)} breakdown">
+      {body}
+    </ul>
     """
 
 
@@ -2930,27 +2929,45 @@ def _page(title: str, body: str) -> str:
 </head>
 <body>
   <header class="site-header">
-    <a href="/">DriftBeacon</a>
+    <a href="/" class="brand-lockup" aria-label="DriftBeacon home">
+      <span class="brand-mark" aria-hidden="true"><span></span></span>
+      <span class="brand-copy">
+        <strong>DriftBeacon</strong>
+        <small>Production risk radar</small>
+      </span>
+    </a>
     <div class="header-actions">
-      <span>Production Health reports</span>
+      <span class="header-pill">Production Health reports</span>
       <button type="button" class="theme-toggle" data-theme-toggle aria-label="Switch colour theme">
-        <span data-theme-label>Theme</span>
+        <span class="theme-icon theme-icon-sun" aria-hidden="true">
+          <svg viewBox="0 0 24 24" focusable="false">
+            <circle cx="12" cy="12" r="4"></circle>
+            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path>
+          </svg>
+        </span>
+        <span class="theme-icon theme-icon-moon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" focusable="false">
+            <path d="M21 12.8A8.2 8.2 0 1 1 11.2 3 6.4 6.4 0 0 0 21 12.8z"></path>
+          </svg>
+        </span>
       </button>
     </div>
   </header>
   {body}
-  <footer class="site-footer">
-    <a href="/sample-report">Example report</a>
-    <a href="/privacy">Beta data and privacy</a>
-    <a href="/acceptable-use">Acceptable use</a>
+  <footer class="site-footer" aria-label="Secondary links">
+    <nav class="footer-links">
+      <a href="/sample-report">Example report</a>
+      <span aria-hidden="true">/</span>
+      <a href="/privacy">Beta data and privacy</a>
+      <span aria-hidden="true">/</span>
+      <a href="/acceptable-use">Acceptable use</a>
+    </nav>
   </footer>
   <script>
     (function() {{
       const button = document.querySelector('[data-theme-toggle]');
-      const label = document.querySelector('[data-theme-label]');
       function applyTheme(theme) {{
         document.documentElement.dataset.theme = theme;
-        if (label) label.textContent = theme === 'dark' ? 'Light mode' : 'Dark mode';
         if (button) button.setAttribute('aria-label', theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode');
       }}
       applyTheme(document.documentElement.dataset.theme || 'light');
@@ -2974,15 +2991,17 @@ def _css() -> str:
       --paper:#f4f7f5; --panel:#ffffff; --panel-2:#f9fbfa; --soft:#edf3f0;
       --accent:#176b56; --accent-ink:#ffffff; --accent-2:#2f7d66; --warning:#fff6e4;
       --warning-line:#e2c47a; --focus:#149569; --danger-bg:#fff0ec; --danger-ink:#7b2718;
-      --shadow:0 18px 48px rgba(10,22,16,.11); --grid:rgba(23,107,86,.08); }
+      --shadow:0 18px 48px rgba(10,22,16,.11); --grid:rgba(23,107,86,.08);
+      --glow:rgba(23,107,86,.18); --neon-flow:rgba(23,107,86,.16); }
     :root[data-theme="dark"] { color-scheme: dark; --ink:#edf5f0; --muted:#9eaca5; --line:#27312d;
       --paper:#050706; --panel:#101412; --panel-2:#141a17; --soft:#171f1b;
       --accent:#63e6aa; --accent-ink:#03110a; --accent-2:#9ee8c6; --warning:#211e14;
       --warning-line:#65512a; --focus:#87f6be; --danger-bg:#321813; --danger-ink:#ffc4b7;
-      --shadow:0 22px 70px rgba(0,0,0,.36); --grid:rgba(99,230,170,.11); }
+      --shadow:0 22px 70px rgba(0,0,0,.36); --grid:rgba(99,230,170,.11);
+      --glow:rgba(99,230,170,.28); --neon-flow:rgba(99,230,170,.18); }
     * { box-sizing: border-box; }
     body { margin:0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      color:var(--ink); background:var(--paper); line-height:1.5; min-height:100vh; padding-bottom:76px; }
+      color:var(--ink); background:var(--paper); line-height:1.5; min-height:100vh; padding-bottom:58px; position:relative; }
     body::before { content:""; position:fixed; inset:0; pointer-events:none; z-index:-1;
       background:
         linear-gradient(90deg, var(--grid) 1px, transparent 1px),
@@ -2990,12 +3009,35 @@ def _css() -> str:
         linear-gradient(135deg, transparent 0 68%, rgba(99,230,170,.08) 68% 69%, transparent 69%);
       background-size:48px 48px, 48px 48px, 680px 680px;
       mask-image:linear-gradient(180deg, rgba(0,0,0,.72), rgba(0,0,0,.18) 62%, transparent); }
-    .site-header { display:flex; justify-content:space-between; align-items:center; padding:18px clamp(18px,4vw,48px);
-      border-bottom:1px solid var(--line); background:color-mix(in srgb, var(--panel) 92%, transparent);
-      backdrop-filter:blur(18px); gap:16px; position:relative; z-index:3; }
+    body::after { content:""; position:fixed; inset:-20%; pointer-events:none; z-index:-1; opacity:.42;
+      background:linear-gradient(115deg, transparent 0 42%, var(--neon-flow) 49%, transparent 57%);
+      background-size:260% 260%; mix-blend-mode:screen; animation:beacon-flow 18s ease-in-out infinite;
+      mask-image:linear-gradient(180deg, transparent 0, rgba(0,0,0,.72) 12%, rgba(0,0,0,.26) 68%, transparent 100%); }
+    @keyframes beacon-flow {
+      0% { background-position:120% 0; opacity:.18; }
+      36% { opacity:.44; }
+      100% { background-position:-120% 100%; opacity:.18; }
+    }
+    .site-header { display:flex; justify-content:space-between; align-items:center; padding:14px clamp(18px,4vw,48px);
+      border-bottom:1px solid color-mix(in srgb, var(--line) 78%, transparent);
+      background:linear-gradient(180deg, color-mix(in srgb, var(--panel) 96%, transparent), color-mix(in srgb, var(--panel) 84%, transparent));
+      backdrop-filter:blur(22px); gap:18px; position:relative; z-index:3; box-shadow:0 14px 34px rgba(0,0,0,.12); }
+    .site-header::after { content:""; position:absolute; left:clamp(18px,4vw,48px); right:clamp(18px,4vw,48px); bottom:-1px; height:1px;
+      background:linear-gradient(90deg, transparent, color-mix(in srgb, var(--accent) 74%, transparent), transparent); opacity:.8; }
     .site-header a, .text-link { color:var(--accent); text-decoration-thickness:2px; text-underline-offset:3px; font-weight:800; }
     .site-header a { color:var(--ink); text-decoration:none; }
-    .site-header span, .eyebrow, dt { color:var(--muted); font-size:0.86rem; }
+    .brand-lockup { display:inline-flex; align-items:center; gap:11px; min-width:0; }
+    .brand-mark { width:34px; height:34px; border-radius:8px; display:grid; place-items:center; position:relative; flex:0 0 auto;
+      background:radial-gradient(circle at 35% 30%, color-mix(in srgb, var(--accent) 80%, white), var(--accent) 52%, color-mix(in srgb, var(--accent) 38%, black));
+      box-shadow:0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent), 0 0 28px var(--glow); overflow:hidden; }
+    .brand-mark::before { content:""; position:absolute; inset:8px 9px; border:1.8px solid var(--accent-ink); border-bottom:0; transform:skewX(-13deg); opacity:.9; }
+    .brand-mark span { width:4px; height:4px; border-radius:999px; background:var(--accent-ink); box-shadow:0 0 12px var(--accent-ink); }
+    .brand-copy { display:grid; gap:0; line-height:1.05; }
+    .brand-copy strong { font-size:1.02rem; letter-spacing:0; }
+    .brand-copy small { color:var(--muted); font-size:.72rem; font-weight:700; letter-spacing:.06em; text-transform:uppercase; }
+    .eyebrow, dt { color:var(--muted); font-size:0.86rem; }
+    .header-pill { color:var(--muted); border:1px solid var(--line); border-radius:999px; padding:5px 9px; font-size:.76rem; font-weight:800;
+      background:color-mix(in srgb, var(--panel-2) 84%, transparent); white-space:nowrap; }
     .header-actions { display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:flex-end; }
     main { max-width:1120px; margin:0 auto; padding:34px clamp(18px,4vw,48px) 110px; position:relative; z-index:1; }
     .narrow { max-width:760px; }
@@ -3011,13 +3053,25 @@ def _css() -> str:
     .access-row { margin-top:14px; max-width:360px; }
     input, textarea, select { width:100%; min-height:46px; border:1px solid var(--line); border-radius:8px; padding:0 14px; font:inherit; background:var(--panel-2); color:var(--ink); }
     textarea { padding:12px 14px; resize:vertical; }
-    button, .button-link { min-height:46px; border:0; border-radius:8px; padding:0 18px; font-weight:800; color:var(--accent-ink); background:var(--accent); cursor:pointer; display:inline-flex; align-items:center; text-decoration:none; box-shadow:0 10px 30px color-mix(in srgb, var(--accent) 18%, transparent); }
+    button, .button-link { min-height:46px; border:0; border-radius:8px; padding:0 18px; font-weight:800; color:var(--accent-ink); background:var(--accent); cursor:pointer; display:inline-flex; align-items:center; justify-content:center; text-decoration:none;
+      box-shadow:0 10px 30px color-mix(in srgb, var(--accent) 18%, transparent);
+      transition:transform .18s ease, box-shadow .18s ease, border-color .18s ease, background-color .18s ease, color .18s ease; }
+    button:not(:disabled):hover, .button-link:hover {
+      transform:translateY(-1px);
+      box-shadow:0 0 0 1px color-mix(in srgb, var(--accent) 38%, transparent), 0 0 30px var(--glow), 0 14px 34px color-mix(in srgb, var(--accent) 18%, transparent);
+    }
+    button:not(:disabled):active, .button-link:active { transform:translateY(0); }
     button:disabled, input:disabled { opacity:0.62; cursor:not-allowed; }
     button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visible {
       outline:3px solid var(--focus); outline-offset:3px;
     }
     .button-link.secondary { background:var(--panel-2); color:var(--ink); border:1px solid var(--line); box-shadow:none; }
-    .theme-toggle { min-height:34px; padding:0 12px; background:var(--panel-2); color:var(--ink); border:1px solid var(--line); box-shadow:none; }
+    .button-link.secondary:hover { border-color:color-mix(in srgb, var(--accent) 42%, var(--line)); color:var(--accent); }
+    .theme-toggle { width:40px; min-height:40px; padding:0; background:color-mix(in srgb, var(--panel-2) 90%, transparent); color:var(--accent); border:1px solid var(--line); box-shadow:none; border-radius:999px; }
+    .theme-icon { width:18px; height:18px; display:none; }
+    .theme-icon svg { width:100%; height:100%; fill:none; stroke:currentColor; stroke-width:1.9; stroke-linecap:round; stroke-linejoin:round; }
+    :root:not([data-theme="dark"]) .theme-icon-sun { display:block; }
+    :root[data-theme="dark"] .theme-icon-moon { display:block; }
     .report-actions { display:flex; flex-wrap:wrap; gap:10px; margin:16px 0; }
     .retention-note, .notice { border:1px solid var(--line); border-radius:8px; padding:12px; background:var(--panel); color:var(--muted); }
     .band, .split, .methodology-note, .panel, .report-status, .report-section, .health-focus, .impact, .evidence, .feedback-section {
@@ -3029,10 +3083,25 @@ def _css() -> str:
       linear-gradient(135deg, color-mix(in srgb, var(--panel) 92%, transparent), color-mix(in srgb, var(--accent) 6%, var(--panel)));
       box-shadow:var(--shadow); }
     .report-status::after { content:""; position:absolute; inset:auto 18px 0 18px; height:2px; background:linear-gradient(90deg, transparent, var(--accent), transparent); opacity:.72; }
-    article, .health-focus aside, .health-focus > div { background:linear-gradient(180deg, var(--panel), var(--panel-2)); border:1px solid var(--line); border-radius:8px; padding:18px; min-width:0; box-shadow:var(--shadow); }
+    article, .health-focus aside, .health-focus > div { background:linear-gradient(180deg, color-mix(in srgb, var(--panel) 96%, transparent), var(--panel-2)); border:1px solid color-mix(in srgb, var(--line) 88%, transparent); border-radius:8px; padding:18px; min-width:0; box-shadow:var(--shadow); }
     .steps article span { display:block; color:var(--muted); margin-top:6px; }
     .status-grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px; margin:18px 0 0; }
     .status-grid div { border:1px solid var(--line); border-radius:8px; padding:12px; background:var(--panel-2); }
+    .breakdown-list { list-style:none; display:grid; gap:10px; margin:0; padding:0; }
+    .metric-row { border:1px solid color-mix(in srgb, var(--line) 82%, transparent); border-radius:8px; padding:10px; position:relative; overflow:hidden;
+      background:linear-gradient(135deg, color-mix(in srgb, var(--soft) 84%, transparent), color-mix(in srgb, var(--panel) 76%, transparent)); }
+    .metric-row::before { content:""; position:absolute; left:0; top:10px; bottom:10px; width:2px; border-radius:999px; background:var(--accent); box-shadow:0 0 16px var(--glow); opacity:.76; }
+    .metric-row-main { display:flex; align-items:center; justify-content:space-between; gap:12px; padding-left:6px; margin-bottom:8px; }
+    .metric-label { font-weight:850; color:var(--ink); overflow-wrap:normal; word-break:normal; }
+    .metric-total { color:var(--accent); font-size:1.15rem; line-height:1; font-weight:950; text-shadow:0 0 16px var(--glow); }
+    .metric-pills { display:grid; grid-template-columns:repeat(4,minmax(42px,1fr)) minmax(52px,1.15fr); gap:6px; }
+    .metric-pill { min-width:0; display:flex; align-items:center; justify-content:space-between; gap:5px; border:1px solid var(--line); border-radius:7px; padding:5px 6px;
+      background:color-mix(in srgb, var(--panel) 82%, transparent); color:var(--muted); font-size:.74rem; font-weight:800; }
+    .metric-pill strong { color:var(--ink); font-size:.88rem; }
+    .metric-critical { border-color:color-mix(in srgb, #ff8f76 38%, var(--line)); }
+    .metric-high { border-color:color-mix(in srgb, #ffd166 38%, var(--line)); }
+    .metric-medium { border-color:color-mix(in srgb, #d7c174 32%, var(--line)); }
+    .metric-low, .metric-total-pill { border-color:color-mix(in srgb, var(--accent) 34%, var(--line)); }
     dd { margin:4px 0 0; font-weight:750; overflow-wrap:anywhere; }
     .step-list { list-style:none; padding:0; margin:22px 0; display:grid; gap:8px; }
     .step-list li { display:flex; justify-content:space-between; gap:12px; border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:var(--panel); }
@@ -3114,17 +3183,14 @@ def _css() -> str:
     .honeypot { position:absolute; left:-10000px; width:1px; height:1px; overflow:hidden; }
     table { width:100%; border-collapse:collapse; font-size:0.9rem; }
     th, td { text-align:left; border-bottom:1px solid var(--line); padding:7px 5px; vertical-align:top; }
-    .table-scroll { width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch; }
-    .metric-table { min-width:315px; font-size:0.86rem; table-layout:auto; }
-    .metric-table th, .metric-table td {
-      padding:7px 4px; white-space:nowrap; overflow-wrap:normal; word-break:normal;
-    }
-    .metric-table th:first-child, .metric-table td:first-child { min-width:6.6rem; text-align:left; }
-    .metric-table th:not(:first-child), .metric-table td:not(:first-child) { min-width:2rem; text-align:right; }
-    .site-footer { position:fixed; left:0; right:0; bottom:0; z-index:20; border-top:1px solid var(--line); padding:14px clamp(18px,4vw,48px); display:flex; flex-wrap:wrap; gap:14px; background:color-mix(in srgb, var(--panel) 94%, transparent); backdrop-filter:blur(18px); box-shadow:0 -12px 34px rgba(0,0,0,.18); }
-    .site-footer a { color:var(--accent); font-weight:700; }
+    .site-footer { position:fixed; left:0; right:0; bottom:0; z-index:20; border-top:1px solid color-mix(in srgb, var(--line) 74%, transparent); padding:7px clamp(18px,4vw,48px);
+      display:flex; justify-content:center; background:color-mix(in srgb, var(--paper) 78%, transparent); backdrop-filter:blur(18px); box-shadow:0 -10px 28px rgba(0,0,0,.12); }
+    .footer-links { display:flex; flex-wrap:wrap; justify-content:center; align-items:center; gap:8px; color:color-mix(in srgb, var(--muted) 74%, transparent); font-size:.74rem; line-height:1.2; }
+    .footer-links a { color:color-mix(in srgb, var(--muted) 86%, var(--accent)); font-weight:700; text-decoration:none; }
+    .footer-links a:hover { color:var(--accent); text-decoration:underline; text-underline-offset:3px; }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { scroll-behavior:auto !important; transition:none !important; animation:none !important; }
+      body::after { display:none; }
     }
     @media (max-width:850px) {
       .form-row, .steps, .split, .health-focus, .priority-list, .evidence-grid, .status-grid,
@@ -3132,9 +3198,14 @@ def _css() -> str:
       h1 { font-size:2.4rem; }
       .score { font-size:3.2rem; }
       .site-header { align-items:flex-start; gap:8px; flex-direction:column; }
-      .header-actions { justify-content:flex-start; }
+      .header-actions { justify-content:space-between; width:100%; }
       .report-tabs { position:static; }
       .help-bubble { left:auto; right:0; transform:none; }
+    }
+    @media (max-width:520px) {
+      body { padding-bottom:70px; }
+      .brand-copy small, .header-pill { display:none; }
+      .metric-pills { grid-template-columns:repeat(3,minmax(48px,1fr)); }
     }
     """
 

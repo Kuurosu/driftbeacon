@@ -570,18 +570,23 @@ def test_sample_report_explains_score_divergence_and_full_explorer() -> None:
     assert 'href="/sample-report?view=all#all-findings" target="_blank"' in html
     assert "data-report-tab=\"overview\"" in html
     assert "data-theme-toggle" in html
+    assert 'class="theme-icon theme-icon-sun"' in html
+    assert 'class="theme-icon theme-icon-moon"' in html
     assert "const theme = stored || 'dark'" in html
     assert "localStorage.setItem('driftbeacon-theme'" in html
     assert "help-popover" in html
+    assert 'class="brand-lockup"' in html
+    assert 'class="brand-mark"' in html
     assert ".site-footer { position:fixed" in html
+    assert 'class="footer-links"' in html
     assert "--accent:#63e6aa" in html
-    assert 'class="metric-table"' in html
-    assert ">Crit</th>" in html
-    assert ">Med</th>" in html
+    assert "@keyframes beacon-flow" in html
+    assert 'class="breakdown-list"' in html
+    assert 'class="metric-row"' in html
+    assert 'class="metric-pill metric-critical"' in html
     assert "Checkov config" in html
     assert "Trivy vuln" in html
-    assert ".metric-table th, .metric-table td" in html
-    assert "white-space:nowrap" in html
+    assert "table-scroll" not in html
     assert "What was hardest to understand?" in html
     assert "overflow-wrap:anywhere" in html
 
