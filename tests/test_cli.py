@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
-from driftbeacon.cli import build_parser
+from driftbeacon.cli import build_parser, main
+from driftbeacon.web_storage import FeedbackRecord, SQLiteScanStore
 
 
 def test_analyse_repo_parser_accepts_git_url_and_options() -> None:
@@ -84,3 +86,58 @@ def test_worker_parser_accepts_once_and_poll_options() -> None:
     assert args.worker_id == "worker-a"
     assert args.poll_interval == 0.5
     assert args.once is True
+
+
+def test_beta_admin_parsers_accept_operational_options() -> None:
+    status = build_parser().parse_args(["beta-status", "--output-dir", ".driftbeacon-web-test"])
+    recent = build_parser().parse_args(["beta-recent-scans", "--limit", "5"])
+    failed = build_parser().parse_args(["beta-failed-scans", "--limit", "7"])
+    pause = build_parser().parse_args(["beta-pause-instructions"])
+    export = build_parser().parse_args(
+        ["feedback-export", "--output-dir", ".driftbeacon-web-test", "--output", "feedback.csv"]
+    )
+
+    assert status.command == "beta-status"
+    assert status.output_dir == Path(".driftbeacon-web-test")
+    assert recent.command == "beta-recent-scans"
+    assert recent.limit == 5
+    assert failed.command == "beta-failed-scans"
+    assert failed.limit == 7
+    assert pause.command == "beta-pause-instructions"
+    assert export.command == "feedback-export"
+    assert export.output == Path("feedback.csv")
+
+
+def test_feedback_export_command_writes_csv(tmp_path: Path) -> None:
+    output_dir = tmp_path / "web"
+    store = SQLiteScanStore(output_dir / "web.sqlite3")
+    store.save_feedback(
+        FeedbackRecord(
+            feedback_id="abcdef123456",
+            created_at=datetime.now(UTC),
+            scan_id=None,
+            source_hash="hash-only",
+            helpfulness="yes",
+            changed_priority="maybe",
+            private_monitoring_interest=True,
+            comment="useful",
+            email="tester@example.com",
+            consent_to_contact=True,
+        )
+    )
+    output = tmp_path / "feedback.csv"
+
+    exit_code = main(
+        [
+            "feedback-export",
+            "--output-dir",
+            str(output_dir),
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert exit_code == 0
+    text = output.read_text(encoding="utf-8")
+    assert "tester@example.com" in text
+    assert "useful" in text

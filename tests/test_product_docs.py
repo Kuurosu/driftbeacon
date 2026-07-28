@@ -42,3 +42,16 @@ def test_roadmap_distinguishes_current_mvp_from_planned_features() -> None:
     assert "Impact simulation must reuse the real scoring model" in text
     assert "Explicitly Out Of Scope For The Current MVP" in text
     assert "multi-tenant production infrastructure" in text
+
+
+def test_beta_docs_cover_launch_privacy_terms_and_tester_material() -> None:
+    checklist = _read("docs/beta-launch-checklist.md")
+    privacy = _read("docs/beta-data-and-privacy.md")
+    terms = _read("docs/beta-acceptable-use.md")
+    invitation = _read("docs/beta-tester-invitation.md")
+
+    assert "DRIFTBEACON_BETA_ACCEPTING_SCANS=false" in checklist
+    assert "keyed hash" in privacy
+    assert "Report links are public to anyone with the URL" in privacy
+    assert "Only submit repositories you are permitted to analyse" in terms
+    assert "Would you connect private repositories for continuous monitoring?" in invitation

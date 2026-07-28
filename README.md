@@ -158,6 +158,15 @@ driftbeacon web \
 
 The web MVP accepts only HTTPS public GitHub repository URLs, stores queued scan jobs, exposes structured status polling and persists shareable completed reports until retention expiry. The worker clones with a shallow Git checkout into isolated temporary directories, uses the same DriftBeacon scan engine as the CLI and deletes temporary clones after success or failure.
 
+The public web experience is designed for a controlled beta:
+
+- The homepage explains DriftBeacon's value proposition, beta scope and public-link limits.
+- `/sample-report` shows a static fixture report without creating a scan job.
+- Invite mode can require a beta access code before a scan starts.
+- `DRIFTBEACON_BETA_ACCEPTING_SCANS=false` pauses new submissions while keeping existing reports and health endpoints available.
+- Daily source and global scan limits are stored in SQLite using a keyed hash of the client source rather than raw IP addresses.
+- Completed reports include a short feedback form and private-monitoring interest prompt.
+
 The web process only validates requests, creates queued scan jobs, reads status and serves completed reports. Run a separate worker process to claim queued scans and execute Git clone, Checkov and Trivy:
 
 ```sh
@@ -181,11 +190,41 @@ Default local web storage:
 | Repository file limit | `8000` | `DRIFTBEACON_WEB_MAX_REPOSITORY_FILES` |
 | Repository byte limit | `157286400` | `DRIFTBEACON_WEB_MAX_REPOSITORY_BYTES` |
 | Report retention | `7` days | `DRIFTBEACON_WEB_RETENTION_DAYS` |
-| Per-client scans per hour | `10` | `DRIFTBEACON_WEB_SCANS_PER_HOUR` |
+| Beta enabled | `true` | `DRIFTBEACON_BETA_ENABLED` |
+| Beta access mode | `open` locally, `invite` in Compose example | `DRIFTBEACON_BETA_ACCESS_MODE` |
+| Beta access codes | empty | `DRIFTBEACON_BETA_ACCESS_CODES` |
+| Accepting new scans | `true` | `DRIFTBEACON_BETA_ACCEPTING_SCANS` |
+| Per-source scans per day | `3` | `DRIFTBEACON_BETA_MAX_SCANS_PER_IP_PER_DAY` |
+| Total scans per day | `25` | `DRIFTBEACON_BETA_MAX_TOTAL_SCANS_PER_DAY` |
+| Feedback submissions per source per day | `5` | `DRIFTBEACON_BETA_MAX_FEEDBACK_PER_IP_PER_DAY` |
+| Rate-limit hash secret | local fallback | `DRIFTBEACON_RATE_LIMIT_SECRET` |
+| Trusted proxy IPs | `127.0.0.1,::1` | `DRIFTBEACON_TRUSTED_PROXY_IPS` |
 | Worker poll seconds | `2` | `DRIFTBEACON_WORKER_POLL_SECONDS` |
 | Worker stale seconds | `600` | `DRIFTBEACON_WORKER_STALE_SECONDS` |
 
 Completed reports are available at `/scans/<scan-id>` after process restarts until they expire. The report page includes Markdown and JSON downloads. Public report links are not private; anyone with the link can view the report during the retention window.
+
+Pause and resume submissions:
+
+```sh
+export DRIFTBEACON_BETA_ACCEPTING_SCANS=false
+# restart the web process
+
+export DRIFTBEACON_BETA_ACCEPTING_SCANS=true
+# restart the web process
+```
+
+Local beta operations:
+
+```sh
+driftbeacon beta-status --output-dir .driftbeacon
+driftbeacon beta-recent-scans --output-dir .driftbeacon --limit 20
+driftbeacon beta-failed-scans --output-dir .driftbeacon --limit 20
+driftbeacon feedback-export --output-dir .driftbeacon --output feedback.csv
+driftbeacon beta-pause-instructions
+```
+
+Feedback exports may contain consenting tester email addresses. `feedback.csv` and common feedback export names are ignored by Git.
 
 Run retention cleanup manually:
 
@@ -195,7 +234,7 @@ driftbeacon web-cleanup --output-dir .driftbeacon
 
 The local persistence model is suitable for local development, a single-instance demo deployment, and controlled early public testing. It is not designed for multi-instance production, high availability, or large-scale untrusted scanning.
 
-For a controlled single-host deployment with Caddy, Docker Compose, HTTPS, backup and rollback notes, see [Single-instance deployment](docs/deployment-single-instance.md).
+For a controlled single-host deployment with Caddy, Docker Compose, HTTPS, backup and rollback notes, see [Single-instance deployment](docs/deployment-single-instance.md). For beta operating notes, see [Beta launch checklist](docs/beta-launch-checklist.md), [Beta data and privacy information](docs/beta-data-and-privacy.md), [Beta acceptable use](docs/beta-acceptable-use.md), and [Tester invitation material](docs/beta-tester-invitation.md).
 
 Analyse public Git repositories without manually cloning them:
 

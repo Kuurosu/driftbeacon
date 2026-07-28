@@ -7,6 +7,7 @@ import os
 import shutil
 import socket
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -124,6 +125,7 @@ class WebScanWorker:
             state.repository_url,
             state.attempt_count,
         )
+        self._record_event("scan_started", scan_id=scan_id)
         try:
             artifacts = self.runner(
                 scan_id,
@@ -158,6 +160,11 @@ class WebScanWorker:
                 exc.error_code,
                 time.monotonic() - started,
             )
+            self._record_event(
+                "scan_failed",
+                scan_id=scan_id,
+                properties={"error_code": exc.error_code},
+            )
             if exc.detail:
                 _LOGGER.info(
                     "service=worker worker_id=%s scan_id=%s detail=%s",
@@ -185,6 +192,11 @@ class WebScanWorker:
                 scan_id,
                 redact_secrets(str(exc)),
             )
+            self._record_event(
+                "scan_failed",
+                scan_id=scan_id,
+                properties={"error_code": "scanner_failure"},
+            )
         else:
             completed_at = datetime.now(UTC)
             self.store.save_report(
@@ -209,6 +221,11 @@ class WebScanWorker:
                 scan_id,
                 time.monotonic() - started,
             )
+            self._record_event(
+                "scan_completed",
+                scan_id=scan_id,
+                properties={"repository": artifacts.repository},
+            )
         finally:
             self._delete_workdir(scan_id)
 
@@ -227,6 +244,20 @@ class WebScanWorker:
             status,
             progress,
         )
+
+    def _record_event(
+        self,
+        event_name: str,
+        *,
+        scan_id: str,
+        properties: dict[str, str | int | float | bool | None] | None = None,
+    ) -> None:
+        with suppress(Exception):
+            self.store.record_analytics_event(
+                event_name,
+                scan_id=scan_id,
+                properties=properties or {},
+            )
 
     def _expiry_from(self, value: datetime) -> datetime:
         return value + timedelta(days=self.web_config.retention_days)

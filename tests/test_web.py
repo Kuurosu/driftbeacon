@@ -4,6 +4,7 @@ import io
 import json
 from collections.abc import Iterable
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlencode
 from wsgiref.util import setup_testing_defaults
@@ -14,6 +15,7 @@ from driftbeacon.analysis_metrics import enrich_findings_for_analysis
 from driftbeacon.comparison import compare_scans
 from driftbeacon.models import ComparisonSummary, ScanResult
 from driftbeacon.web import (
+    BetaConfig,
     DriftBeaconWebApp,
     FileReportStore,
     PublicGitHubRepositoryProvider,
@@ -23,11 +25,14 @@ from driftbeacon.web import (
     WebScanService,
     WebScanState,
     _enforce_repository_limits,
+    client_source_from_environ,
+    hash_submission_source,
     normalise_public_github_url,
     render_home_page,
     render_progress_page,
     render_repository_report_page,
     run_public_repository_scan,
+    sample_report_data,
 )
 from driftbeacon.worker import WebScanWorker, WorkerConfig
 
@@ -39,6 +44,7 @@ def _request(
     *,
     body: str = "",
     remote_addr: str = "127.0.0.1",
+    headers: dict[str, str] | None = None,
 ) -> tuple[str, dict[str, str], str]:
     captured: dict[str, object] = {}
 
@@ -56,13 +62,16 @@ def _request(
     environ.update(
         {
             "REQUEST_METHOD": method,
-            "PATH_INFO": path,
+            "PATH_INFO": path.split("?", 1)[0],
+            "QUERY_STRING": path.split("?", 1)[1] if "?" in path else "",
             "REMOTE_ADDR": remote_addr,
             "wsgi.input": io.BytesIO(body.encode("utf-8")),
             "CONTENT_LENGTH": str(len(body.encode("utf-8"))),
             "CONTENT_TYPE": "application/x-www-form-urlencoded",
         }
     )
+    for key, value in (headers or {}).items():
+        environ[key] = value
     chunks = app(environ, start_response)
     payload = b"".join(_as_bytes(chunks)).decode("utf-8")
     return str(captured["status"]), captured["headers"], payload  # type: ignore[return-value]
@@ -148,10 +157,10 @@ def _web_config(tmp_path: Path) -> WebConfig:
         scanner_timeout_seconds=10,
         clone_timeout_seconds=10,
         retention_days=7,
-        scans_per_hour=3,
         max_repository_files=10,
         max_repository_bytes=1024 * 1024,
         top_findings=3,
+        beta=BetaConfig(rate_limit_secret="test-secret"),
     )
 
 
@@ -202,7 +211,7 @@ def test_web_routes_submit_scan_and_render_status(tmp_path: Path) -> None:
 
     status, _headers, body = _request(app, "GET", location)
     assert status.startswith("200")
-    assert "Queued for analysis" in body
+    assert "Queued" in body
 
     scan_id = location.rsplit("/", 1)[-1]
     status, _headers, body = _request(app, "GET", f"/api/scans/{scan_id}")
@@ -227,6 +236,7 @@ def test_web_routes_submit_scan_and_render_status(tmp_path: Path) -> None:
     assert status.startswith("200")
     assert "owner/repo" in body
     assert "What to fix next" in body
+    assert "data-interest-link" in body
 
     status, _headers, body = _request(app, "GET", f"/scans/{scan_id}/report.md")
     assert status.startswith("200")
@@ -241,6 +251,7 @@ def test_web_routes_submit_scan_and_render_status(tmp_path: Path) -> None:
     assert status.startswith("200")
     assert "owner/repo" in body
     assert "Anyone with this link can view it" in body
+    assert "Did this report help you decide what to fix?" in body
 
 
 def test_web_rejects_invalid_repository_without_starting_scan(tmp_path: Path) -> None:
@@ -305,6 +316,216 @@ def test_web_submission_only_queues_scan(tmp_path: Path) -> None:
     assert state is not None
     assert state.status == "queued"
     assert service.report_store.load(scan_id) is None
+
+
+def test_invite_mode_requires_valid_beta_access_code(tmp_path: Path) -> None:
+    config = replace(
+        _web_config(tmp_path),
+        beta=BetaConfig(
+            access_mode="invite",
+            access_codes=("correct-code",),
+            rate_limit_secret="test-secret",
+        ),
+    )
+    service = WebScanService(config)
+    app = DriftBeaconWebApp(service)
+
+    invalid = urlencode(
+        {
+            "repository_url": "https://github.com/owner/repo",
+            "beta_access_code": "wrong-code",
+        }
+    )
+    status, _headers, body = _request(app, "POST", "/scans", body=invalid)
+
+    assert status.startswith("403")
+    assert "valid beta access code" in body
+    assert "wrong-code" not in body
+    assert service.store.count_queued_scans() == 0
+
+    valid = urlencode(
+        {
+            "repository_url": "https://github.com/owner/repo",
+            "beta_access_code": "correct-code",
+        }
+    )
+    status, headers, _body = _request(app, "POST", "/scans", body=valid)
+
+    assert status.startswith("303")
+    assert headers["Location"].startswith("/scans/")
+    assert "correct-code" not in str(service.store.recent_scans(limit=1)[0].to_dict())
+
+
+def test_kill_switch_rejects_new_scans_but_keeps_reports_accessible(tmp_path: Path) -> None:
+    active_config = _web_config(tmp_path)
+    service = WebScanService(active_config)
+    app = DriftBeaconWebApp(service)
+    status, headers, _body = _request(
+        app,
+        "POST",
+        "/scans",
+        body=urlencode({"repository_url": "https://github.com/owner/repo"}),
+    )
+    scan_id = headers["Location"].rsplit("/", 1)[-1]
+    worker = WebScanWorker(
+        active_config,
+        WorkerConfig(worker_id="test-worker", poll_interval_seconds=0.1, stale_seconds=60),
+        runner=_fake_runner,
+    )
+    assert status.startswith("303")
+    assert worker.process_once() is True
+
+    paused_config = replace(
+        active_config,
+        beta=BetaConfig(accepting_scans=False, rate_limit_secret="test-secret"),
+    )
+    paused_app = DriftBeaconWebApp(WebScanService(paused_config))
+    status, _headers, body = _request(
+        paused_app,
+        "POST",
+        "/scans",
+        body=urlencode({"repository_url": "https://github.com/owner/other"}),
+    )
+    assert status.startswith("503")
+    assert "temporarily paused" in body
+
+    status, _headers, body = _request(paused_app, "GET", f"/scans/{scan_id}")
+    assert status.startswith("200")
+    assert "owner/repo" in body
+
+
+def test_daily_rate_limits_are_sqlite_backed_and_do_not_store_raw_ip(tmp_path: Path) -> None:
+    config = replace(
+        _web_config(tmp_path),
+        max_queued_scans=10,
+        beta=BetaConfig(
+            max_scans_per_source_per_day=1,
+            max_total_scans_per_day=10,
+            rate_limit_secret="test-secret",
+        ),
+    )
+    service = WebScanService(config)
+
+    service.submit("https://github.com/owner/one", client_id="203.0.113.7")
+    with pytest.raises(ValueError, match="public beta scan limit"):
+        service.submit("https://github.com/owner/two", client_id="203.0.113.7")
+
+    expected_hash = hash_submission_source("203.0.113.7", "test-secret")
+    usage = service.store.source_daily_usage(
+        source_hash=expected_hash,
+        date_bucket=datetime.now(UTC).date().isoformat(),
+    )
+    assert usage == {"accepted": 1, "rejected": 1}
+    assert "203.0.113.7" not in config.database_path.read_text(
+        encoding="utf-8",
+        errors="ignore",
+    )
+
+
+def test_global_daily_rate_limit_rejects_without_queueing(tmp_path: Path) -> None:
+    config = replace(
+        _web_config(tmp_path),
+        max_queued_scans=10,
+        beta=BetaConfig(
+            max_scans_per_source_per_day=10,
+            max_total_scans_per_day=1,
+            rate_limit_secret="test-secret",
+        ),
+    )
+    service = WebScanService(config)
+
+    service.submit("https://github.com/owner/one", client_id="203.0.113.7")
+    with pytest.raises(ValueError, match="public beta scan limit"):
+        service.submit("https://github.com/owner/two", client_id="203.0.113.8")
+
+    assert service.store.count_queued_scans() == 1
+
+
+def test_trusted_proxy_header_is_used_only_for_configured_proxy() -> None:
+    environ: dict[str, object] = {
+        "REMOTE_ADDR": "127.0.0.1",
+        "HTTP_X_FORWARDED_FOR": "203.0.113.7, 10.0.0.1",
+    }
+    beta = BetaConfig(rate_limit_secret="test-secret")
+
+    assert client_source_from_environ(environ, beta) == "203.0.113.7"
+
+    untrusted = {
+        "REMOTE_ADDR": "198.51.100.10",
+        "HTTP_X_FORWARDED_FOR": "203.0.113.7",
+    }
+    assert client_source_from_environ(untrusted, beta) == "198.51.100.10"
+
+
+def test_sample_report_uses_fixture_data_without_database_job(tmp_path: Path) -> None:
+    service = WebScanService(_web_config(tmp_path))
+    app = DriftBeaconWebApp(service)
+
+    status, _headers, body = _request(app, "GET", "/sample-report")
+
+    assert status.startswith("200")
+    assert "Example report" in body
+    assert "Production Health" in body
+    assert "What to fix next" in body
+    assert "example/public-infra-demo" in body
+    assert service.store.count_queued_scans() == 0
+
+
+def test_feedback_submission_stores_optional_email_only_with_consent(tmp_path: Path) -> None:
+    service = WebScanService(_web_config(tmp_path))
+    app = DriftBeaconWebApp(service)
+    form = urlencode(
+        {
+            "helpfulness": "partly",
+            "changed_priority": "maybe",
+            "comment": "<script>useful but confusing</script>",
+            "private_monitoring_interest": "yes",
+            "email": "tester@example.com",
+        }
+    )
+
+    status, headers, _body = _request(app, "POST", "/feedback", body=form)
+
+    assert status.startswith("303")
+    assert headers["Location"] == "/sample-report?feedback=thanks"
+    rows = service.store.list_feedback()
+    assert len(rows) == 1
+    assert rows[0].comment == "<script>useful but confusing</script>"
+    assert rows[0].private_monitoring_interest is True
+    assert rows[0].email is None
+    assert rows[0].consent_to_contact is False
+
+    consenting = urlencode(
+        {
+            "helpfulness": "yes",
+            "changed_priority": "yes",
+            "comment": "weekly would help",
+            "email": "tester@example.com",
+            "consent_to_contact": "yes",
+        }
+    )
+    _request(app, "POST", "/feedback", body=consenting, remote_addr="127.0.0.2")
+    rows = service.store.list_feedback()
+    assert rows[0].email == "tester@example.com"
+    assert rows[0].consent_to_contact is True
+
+
+def test_feedback_honeypot_does_not_store_submission(tmp_path: Path) -> None:
+    service = WebScanService(_web_config(tmp_path))
+    app = DriftBeaconWebApp(service)
+    form = urlencode(
+        {
+            "helpfulness": "yes",
+            "changed_priority": "yes",
+            "comment": "spam",
+            "website": "https://spam.example",
+        }
+    )
+
+    status, _headers, _body = _request(app, "POST", "/feedback", body=form)
+
+    assert status.startswith("303")
+    assert service.store.list_feedback() == []
 
 
 def test_web_report_prioritises_production_health_and_reuses_explanations(
@@ -372,15 +593,19 @@ def test_web_service_uses_configurable_limits_without_plan_enforcement(tmp_path:
         report_dir=tmp_path / "web" / "reports",
         working_dir=tmp_path / "web" / "work",
         max_concurrent_scans=1,
-        max_queued_scans=2,
+        max_queued_scans=10,
         max_scan_seconds=10,
         scanner_timeout_seconds=10,
         clone_timeout_seconds=10,
         retention_days=7,
-        scans_per_hour=2,
         max_repository_files=10,
         max_repository_bytes=1024 * 1024,
         top_findings=3,
+        beta=BetaConfig(
+            max_scans_per_source_per_day=2,
+            max_total_scans_per_day=25,
+            rate_limit_secret="test-secret",
+        ),
     )
     service = WebScanService(config)
 
@@ -391,7 +616,7 @@ def test_web_service_uses_configurable_limits_without_plan_enforcement(tmp_path:
     assert second.status == "queued"
     assert not hasattr(config, "plan")
 
-    with pytest.raises(ValueError, match="Too many scans"):
+    with pytest.raises(ValueError, match="public beta scan limit"):
         service.submit("https://github.com/owner/three", client_id="client")
 
 
@@ -407,10 +632,10 @@ def test_web_rejects_when_queue_capacity_is_full(tmp_path: Path) -> None:
         scanner_timeout_seconds=10,
         clone_timeout_seconds=10,
         retention_days=7,
-        scans_per_hour=2,
         max_repository_files=10,
         max_repository_bytes=1024 * 1024,
         top_findings=3,
+        beta=BetaConfig(rate_limit_secret="test-secret"),
     )
     service = WebScanService(config)
     app = DriftBeaconWebApp(service)
@@ -540,4 +765,24 @@ def test_progress_page_keeps_scanner_errors_visible() -> None:
 
     html = render_progress_page(state)
 
-    assert "scanner exited 2" in html
+    assert "scanner exited 2" not in html
+    assert "Scan could not complete" in html
+
+
+def test_unsupported_target_report_does_not_show_perfect_health() -> None:
+    scan, comparison = sample_report_data()
+    scan.findings = []
+    scan.health_score = None
+    scan.summary = {
+        "coverage_state": "not_scored_no_supported_files",
+        "production_coverage_state": "not_scored_no_supported_files",
+        "production_health_score": None,
+        "production_grade": None,
+        "production_score_reason": "No supported files were detected.",
+    }
+
+    html = render_repository_report_page(scan, comparison)
+
+    assert "No eligible scan targets were found" in html
+    assert "Not scored" in html
+    assert "100/100" not in html

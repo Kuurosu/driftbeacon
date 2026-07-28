@@ -11,7 +11,12 @@ from test_web import _request
 from driftbeacon.models import ComparisonSummary, ScanResult
 from driftbeacon.storage import StorageError
 from driftbeacon.web import DriftBeaconWebApp, WebConfig, WebScanService
-from driftbeacon.web_storage import FileReportStore, SQLiteScanStore, WebScanState
+from driftbeacon.web_storage import (
+    FeedbackRecord,
+    FileReportStore,
+    SQLiteScanStore,
+    WebScanState,
+)
 
 
 def _state(scan_id: str, tmp_path: Path, *, status: str = "queued") -> WebScanState:
@@ -216,6 +221,65 @@ def test_sqlite_v1_schema_migrates_to_worker_queue_columns(tmp_path: Path) -> No
     assert store.check_ready() is True
     assert claimed is not None
     assert claimed.worker_id == "worker"
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'beta_usage_counters'"
+        ).fetchone()
+
+
+def test_sqlite_v2_schema_migrates_to_beta_tables(tmp_path: Path) -> None:
+    database = tmp_path / "v2.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE web_schema_version (id INTEGER PRIMARY KEY, version INTEGER NOT NULL)"
+        )
+        connection.execute("INSERT INTO web_schema_version (id, version) VALUES (1, 2)")
+        connection.execute(
+            """
+            CREATE TABLE scans (
+              scan_id TEXT PRIMARY KEY,
+              repository_url TEXT NOT NULL,
+              repository_owner TEXT NOT NULL,
+              repository_name TEXT NOT NULL,
+              status TEXT NOT NULL,
+              message TEXT NOT NULL,
+              progress INTEGER NOT NULL,
+              created_at TEXT NOT NULL,
+              started_at TEXT,
+              completed_at TEXT,
+              updated_at TEXT NOT NULL,
+              expires_at TEXT,
+              error_code TEXT,
+              safe_error_message TEXT,
+              report_reference TEXT,
+              report_format_version TEXT NOT NULL,
+              repository TEXT,
+              branch TEXT,
+              commit_sha TEXT,
+              overall_health INTEGER,
+              overall_grade TEXT,
+              production_health INTEGER,
+              production_grade TEXT,
+              coverage_status TEXT,
+              baseline_type TEXT,
+              worker_id TEXT,
+              claimed_at TEXT,
+              heartbeat_at TEXT,
+              attempt_count INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+
+    store = SQLiteScanStore(database)
+
+    assert store.check_ready() is True
+    decision = store.record_submission_attempt(
+        source_hash="abc",
+        date_bucket="2026-07-24",
+        max_source_accepts=1,
+        max_total_accepts=1,
+    )
+    assert decision.allowed is True
 
 
 def test_sqlite_insert_uses_parameters_for_repository_url(tmp_path: Path) -> None:
@@ -228,6 +292,70 @@ def test_sqlite_insert_uses_parameters_for_repository_url(tmp_path: Path) -> Non
     assert store.get_scan("abcdef123456") is not None
     store.create_scan(_state("abcdef123457", tmp_path))
     assert store.get_scan("abcdef123457") is not None
+
+
+def test_sqlite_beta_usage_counters_enforce_source_and_global_limits(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteScanStore(tmp_path / "web.sqlite3")
+
+    first = store.record_submission_attempt(
+        source_hash="source-a",
+        date_bucket="2026-07-24",
+        max_source_accepts=1,
+        max_total_accepts=2,
+    )
+    second = store.record_submission_attempt(
+        source_hash="source-a",
+        date_bucket="2026-07-24",
+        max_source_accepts=1,
+        max_total_accepts=2,
+    )
+    third = store.record_submission_attempt(
+        source_hash="source-b",
+        date_bucket="2026-07-24",
+        max_source_accepts=2,
+        max_total_accepts=1,
+    )
+
+    assert first.allowed is True
+    assert second.allowed is False
+    assert second.reason == "source_daily_limit"
+    assert third.allowed is False
+    assert third.reason == "global_daily_limit"
+    assert store.daily_submission_counts("2026-07-24") == {"accepted": 1, "rejected": 2}
+
+
+def test_sqlite_feedback_and_analytics_are_local_only_records(tmp_path: Path) -> None:
+    store = SQLiteScanStore(tmp_path / "web.sqlite3")
+    now = datetime.now(UTC)
+    feedback = FeedbackRecord(
+        feedback_id="abcdef123456",
+        created_at=now,
+        scan_id=None,
+        source_hash="hash-only",
+        helpfulness="yes",
+        changed_priority="maybe",
+        private_monitoring_interest=True,
+        comment="<b>helpful</b>",
+        email="tester@example.com",
+        consent_to_contact=True,
+    )
+
+    store.save_feedback(feedback)
+    store.record_analytics_event(
+        "feedback_submitted",
+        source_hash="hash-only",
+        properties={"helpfulness": "yes"},
+        created_at=now,
+    )
+
+    rows = store.list_feedback()
+    assert len(rows) == 1
+    assert rows[0].comment == "<b>helpful</b>"
+    assert rows[0].email == "tester@example.com"
+    assert store.count_private_monitoring_interest_on(now.date().isoformat()) == 1
+    assert store.event_counts_on(now.date().isoformat()) == {"feedback_submitted": 1}
 
 
 def test_report_store_round_trips_deletes_and_rejects_path_traversal(tmp_path: Path) -> None:
@@ -319,7 +447,6 @@ def _web_config(tmp_path: Path) -> WebConfig:
         scanner_timeout_seconds=10,
         clone_timeout_seconds=10,
         retention_days=7,
-        scans_per_hour=3,
         max_repository_files=10,
         max_repository_bytes=1024 * 1024,
         top_findings=3,

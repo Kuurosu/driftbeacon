@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import html
+import ipaddress
 import json
 import logging
 import os
@@ -13,14 +16,13 @@ import shutil
 import tempfile
 import time
 import uuid
-from collections import defaultdict
 from collections.abc import Callable, Iterable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from wsgiref.simple_server import make_server
 from wsgiref.types import StartResponse, WSGIEnvironment
 
@@ -35,6 +37,7 @@ from .scanners.base import safe_walk
 from .storage import StorageError
 from .web_storage import (
     WEB_REPORT_FORMAT_VERSION,
+    FeedbackRecord,
     FileReportStore,
     ScanStatus,
     SQLiteScanStore,
@@ -62,6 +65,86 @@ _GITHUB_OWNER_REPO = re.compile(r"^[A-Za-z0-9_.-]+$")
 _LOGGER = logging.getLogger("driftbeacon.web")
 
 
+BetaAccessMode = Literal["open", "invite"]
+
+
+@dataclass(frozen=True, slots=True)
+class BetaConfig:
+    """Controlled public beta settings for web submissions."""
+
+    enabled: bool = True
+    access_mode: BetaAccessMode = "open"
+    access_codes: tuple[str, ...] = ()
+    accepting_scans: bool = True
+    max_scans_per_source_per_day: int = 3
+    max_total_scans_per_day: int = 25
+    rate_limit_secret: str = "driftbeacon-local-rate-limit"
+    trusted_proxy_ips: tuple[str, ...] = ("127.0.0.1", "::1")
+    max_feedback_per_source_per_day: int = 5
+
+    @classmethod
+    def from_environment(cls, env: dict[str, str] | None = None) -> BetaConfig:
+        source = env or dict(os.environ)
+        raw_mode = source.get("DRIFTBEACON_BETA_ACCESS_MODE", "open").strip().lower()
+        access_mode: BetaAccessMode = "invite" if raw_mode == "invite" else "open"
+        return cls(
+            enabled=_env_bool(source, "DRIFTBEACON_BETA_ENABLED", True),
+            access_mode=access_mode,
+            access_codes=_env_list(source, "DRIFTBEACON_BETA_ACCESS_CODES"),
+            accepting_scans=_env_bool(source, "DRIFTBEACON_BETA_ACCEPTING_SCANS", True),
+            max_scans_per_source_per_day=_env_int(
+                source,
+                "DRIFTBEACON_BETA_MAX_SCANS_PER_IP_PER_DAY",
+                3,
+            ),
+            max_total_scans_per_day=_env_int(
+                source,
+                "DRIFTBEACON_BETA_MAX_TOTAL_SCANS_PER_DAY",
+                25,
+            ),
+            rate_limit_secret=(
+                source.get("DRIFTBEACON_RATE_LIMIT_SECRET", "").strip()
+                or "driftbeacon-local-rate-limit"
+            ),
+            trusted_proxy_ips=_env_list(
+                source,
+                "DRIFTBEACON_TRUSTED_PROXY_IPS",
+                default=("127.0.0.1", "::1"),
+            ),
+            max_feedback_per_source_per_day=_env_int(
+                source,
+                "DRIFTBEACON_BETA_MAX_FEEDBACK_PER_IP_PER_DAY",
+                5,
+            ),
+        ).validate()
+
+    def validate(self) -> BetaConfig:
+        if self.access_mode not in {"open", "invite"}:
+            raise ValueError("beta access_mode must be open or invite")
+        if self.max_scans_per_source_per_day < 1:
+            raise ValueError("beta max_scans_per_source_per_day must be at least 1")
+        if self.max_total_scans_per_day < 1:
+            raise ValueError("beta max_total_scans_per_day must be at least 1")
+        if self.max_feedback_per_source_per_day < 1:
+            raise ValueError("beta max_feedback_per_source_per_day must be at least 1")
+        if not self.rate_limit_secret.strip():
+            raise ValueError("DRIFTBEACON_RATE_LIMIT_SECRET must not be empty")
+        for value in self.trusted_proxy_ips:
+            with suppress(ValueError):
+                ipaddress.ip_address(value)
+                continue
+            raise ValueError("trusted proxy IPs must be valid IP addresses")
+        return self
+
+    def access_code_is_valid(self, candidate: str) -> bool:
+        if self.access_mode == "open":
+            return True
+        submitted = candidate.strip()
+        if not submitted or not self.access_codes:
+            return False
+        return any(hmac.compare_digest(submitted, code) for code in self.access_codes)
+
+
 @dataclass(frozen=True, slots=True)
 class WebConfig:
     """Configuration for the public web scan MVP."""
@@ -76,10 +159,10 @@ class WebConfig:
     scanner_timeout_seconds: int = 300
     clone_timeout_seconds: int = 120
     retention_days: int = 7
-    scans_per_hour: int = 10
     max_repository_files: int = 8_000
     max_repository_bytes: int = 150 * 1024 * 1024
     top_findings: int = 3
+    beta: BetaConfig = field(default_factory=BetaConfig)
 
     @classmethod
     def from_environment(cls, env: dict[str, str] | None = None) -> WebConfig:
@@ -106,7 +189,6 @@ class WebConfig:
             ),
             clone_timeout_seconds=_env_int(source, "DRIFTBEACON_WEB_CLONE_TIMEOUT", 120),
             retention_days=_env_int(source, "DRIFTBEACON_WEB_RETENTION_DAYS", 7),
-            scans_per_hour=_env_int(source, "DRIFTBEACON_WEB_SCANS_PER_HOUR", 10),
             max_repository_files=_env_int(source, "DRIFTBEACON_WEB_MAX_REPOSITORY_FILES", 8_000),
             max_repository_bytes=_env_int(
                 source,
@@ -114,6 +196,7 @@ class WebConfig:
                 150 * 1024 * 1024,
             ),
             top_findings=_env_int(source, "DRIFTBEACON_WEB_TOP_FINDINGS", 3),
+            beta=BetaConfig.from_environment(source),
         ).validate()
 
     def validate(self) -> WebConfig:
@@ -129,14 +212,13 @@ class WebConfig:
             raise ValueError("web timeouts must be at least 1 second")
         if self.retention_days < 1:
             raise ValueError("web retention_days must be at least 1")
-        if self.scans_per_hour < 1:
-            raise ValueError("web scans_per_hour must be at least 1")
         if self.max_repository_files < 1:
             raise ValueError("web max_repository_files must be at least 1")
         if self.max_repository_bytes < 1:
             raise ValueError("web max_repository_bytes must be at least 1")
         if self.top_findings < 1:
             raise ValueError("web top_findings must be at least 1")
+        self.beta.validate()
         if self.output_dir.exists() and self.output_dir.is_symlink():
             raise ValueError("web output_dir must not be a symlink")
         for path_name, path in (
@@ -273,26 +355,38 @@ class WebScanService:
         self.report_store = FileReportStore(self.config.report_dir)
         self.analytics = analytics or NoOpAnalytics()
         self.provider = provider or PublicGitHubRepositoryProvider()
-        self._submissions: dict[str, list[float]] = defaultdict(list)
         if recover_interrupted:
             self.mark_abandoned_scans_interrupted()
         if cleanup_on_start:
             self.cleanup_expired_scans()
 
-    def submit(self, repository_url: str, *, client_id: str = "anonymous") -> WebScanState:
+    def submit(
+        self,
+        repository_url: str,
+        *,
+        client_id: str = "anonymous",
+        access_code: str = "",
+    ) -> WebScanState:
         try:
             normalised_url = self.provider.normalise_url(repository_url)
         except ValueError as exc:
             raise WebSubmissionError("invalid_repository_url", str(exc)) from exc
-        self._enforce_rate_limit(client_id)
+        source_hash = self.source_hash(client_id)
+        self._enforce_beta_access(source_hash, access_code)
         self.cleanup_expired_scans()
         if self.store.count_queued_scans() >= self.config.max_queued_scans:
-            self.analytics.record("scan_rejected", {"reason": "capacity_reached"})
+            self._record_rejected_submission(source_hash)
+            self.record_event(
+                "scan_rejected",
+                source_hash=source_hash,
+                properties={"reason": "capacity_reached"},
+            )
             raise WebSubmissionError(
                 "capacity_reached",
                 "The public demo is currently at capacity. Please try again later.",
                 http_status="503 Service Unavailable",
             )
+        self._enforce_daily_rate_limit(source_hash)
         owner, repo = _repository_parts(normalised_url)
         scan_id = uuid.uuid4().hex
         now = datetime.now(UTC)
@@ -306,11 +400,16 @@ class WebScanService:
             progress=5,
             created_at=now,
             updated_at=now,
-            client_id=client_id,
+            client_id=source_hash,
         )
         self.store.create_scan(state)
         _log_scan(scan_id, normalised_url, "queued", "created")
-        self.analytics.record("scan_submitted", {"scan_id": scan_id})
+        self.record_event(
+            "scan_submitted",
+            source_hash=source_hash,
+            scan_id=scan_id,
+            properties={"repository": f"{owner}/{repo}"},
+        )
         return self.get(scan_id) or state
 
     def get(self, scan_id: str) -> WebScanState | None:
@@ -372,21 +471,141 @@ class WebScanService:
         except StorageError:
             return False
 
-    def _enforce_rate_limit(self, client_id: str) -> None:
-        now = time.time()
-        window_start = now - 3600
-        submissions = [
-            timestamp for timestamp in self._submissions[client_id] if timestamp >= window_start
-        ]
-        if len(submissions) >= self.config.scans_per_hour:
-            self.analytics.record("scan_rejected", {"reason": "rate_limit"})
+    def source_hash(self, client_id: str) -> str:
+        return hash_submission_source(client_id, self.config.beta.rate_limit_secret)
+
+    def record_event(
+        self,
+        event: str,
+        *,
+        source_hash: str | None = None,
+        scan_id: str | None = None,
+        properties: AnalyticsProperties | None = None,
+    ) -> None:
+        safe_properties = properties or {}
+        with suppress(Exception):
+            self.store.record_analytics_event(
+                event,
+                source_hash=source_hash,
+                scan_id=scan_id,
+                properties=dict(safe_properties),
+            )
+        with suppress(Exception):
+            self.analytics.record(event, safe_properties)
+
+    def save_feedback(
+        self,
+        *,
+        source_hash: str,
+        scan_id: str | None,
+        helpfulness: str,
+        changed_priority: str,
+        private_monitoring_interest: bool,
+        comment: str,
+        email: str,
+        consent_to_contact: bool,
+    ) -> str:
+        date_bucket = _date_bucket(datetime.now(UTC))
+        if (
+            self.store.count_feedback_from_source_on(
+                source_hash=source_hash,
+                date_bucket=date_bucket,
+            )
+            >= self.config.beta.max_feedback_per_source_per_day
+        ):
             raise WebSubmissionError(
                 "capacity_reached",
-                "Too many scans from this client. Please try again later.",
+                "The public beta feedback limit has been reached. Please try again later.",
                 http_status="429 Too Many Requests",
             )
-        submissions.append(now)
-        self._submissions[client_id] = submissions
+        feedback_id = uuid.uuid4().hex
+        stored_email = email.strip() if consent_to_contact else ""
+        self.store.save_feedback(
+            FeedbackRecord(
+                feedback_id=feedback_id,
+                created_at=datetime.now(UTC),
+                scan_id=scan_id,
+                source_hash=source_hash,
+                helpfulness=helpfulness,
+                changed_priority=changed_priority,
+                private_monitoring_interest=private_monitoring_interest,
+                comment=comment,
+                email=stored_email or None,
+                consent_to_contact=bool(consent_to_contact and stored_email),
+            )
+        )
+        self.record_event(
+            "feedback_submitted",
+            source_hash=source_hash,
+            scan_id=scan_id,
+            properties={"helpfulness": helpfulness, "changed_priority": changed_priority},
+        )
+        if private_monitoring_interest:
+            self.record_event(
+                "private_monitoring_interest_submitted",
+                source_hash=source_hash,
+                scan_id=scan_id,
+                properties={"consent_to_contact": bool(consent_to_contact and stored_email)},
+            )
+        return feedback_id
+
+    def _enforce_beta_access(self, source_hash: str, access_code: str) -> None:
+        beta = self.config.beta
+        if not beta.enabled:
+            return
+        if not beta.accepting_scans:
+            self._record_rejected_submission(source_hash)
+            self.record_event(
+                "scan_rejected",
+                source_hash=source_hash,
+                properties={"reason": "submissions_paused"},
+            )
+            raise WebSubmissionError(
+                "capacity_reached",
+                "New scans are temporarily paused while we perform maintenance. Existing reports remain available.",
+                http_status="503 Service Unavailable",
+            )
+        if beta.access_mode == "invite" and not beta.access_code_is_valid(access_code):
+            self._record_rejected_submission(source_hash)
+            self.record_event(
+                "scan_rejected",
+                source_hash=source_hash,
+                properties={"reason": "invalid_beta_access_code"},
+            )
+            raise WebSubmissionError(
+                "capacity_reached",
+                "Enter a valid beta access code to start a scan.",
+                http_status="403 Forbidden",
+            )
+
+    def _enforce_daily_rate_limit(self, source_hash: str) -> None:
+        beta = self.config.beta
+        if not beta.enabled:
+            return
+        result = self.store.record_submission_attempt(
+            source_hash=source_hash,
+            date_bucket=_date_bucket(datetime.now(UTC)),
+            max_source_accepts=beta.max_scans_per_source_per_day,
+            max_total_accepts=beta.max_total_scans_per_day,
+        )
+        if not result.allowed:
+            self.record_event(
+                "scan_rejected",
+                source_hash=source_hash,
+                properties={"reason": result.reason},
+            )
+            raise WebSubmissionError(
+                "capacity_reached",
+                "The public beta scan limit has been reached. Please try again later.",
+                http_status="429 Too Many Requests",
+            )
+
+    def _record_rejected_submission(self, source_hash: str) -> None:
+        with suppress(StorageError):
+            self.store.record_rejected_submission(
+                source_hash=source_hash,
+                date_bucket=_date_bucket(datetime.now(UTC)),
+            )
 
     def _expiry_from(self, value: datetime) -> datetime:
         return value + timedelta(days=self.config.retention_days)
@@ -434,22 +653,42 @@ class DriftBeaconWebApp:
                     status="503 Service Unavailable",
                 )
             if method == "GET" and path == "/":
-                self.service.analytics.record("landing_page_viewed", {})
-                return self._html(start_response, render_home_page())
+                source_hash = self._source_hash(environ)
+                self.service.record_event("homepage_viewed", source_hash=source_hash)
+                return self._html(start_response, render_home_page(config=self.service.config))
+            if method == "GET" and path == "/sample-report":
+                source_hash = self._source_hash(environ)
+                self.service.record_event("sample_report_viewed", source_hash=source_hash)
+                return self._html(
+                    start_response,
+                    render_sample_report_page(
+                        feedback_submitted=_query_flag(environ, "feedback", "thanks")
+                    ),
+                )
+            if method == "GET" and path == "/privacy":
+                return self._html(start_response, render_privacy_page())
+            if method == "GET" and path == "/acceptable-use":
+                return self._html(start_response, render_acceptable_use_page())
             if method == "POST" and path == "/scans":
                 return self._submit(environ, start_response)
+            if method == "POST" and path == "/feedback":
+                return self._submit_feedback(environ, start_response)
             if method == "GET" and path.startswith("/api/scans/"):
                 return self._api_scan(path, start_response)
             if method == "GET" and path.startswith("/scans/"):
-                return self._scan_page(path, start_response)
+                return self._scan_page(path, start_response, environ)
         except WebSubmissionError as exc:
             return self._html(
                 start_response,
-                render_home_page(error=exc.safe_message),
+                render_home_page(error=exc.safe_message, config=self.service.config),
                 status=exc.http_status,
             )
         except ValueError as exc:
-            return self._html(start_response, render_home_page(error=str(exc)), status="400 Bad Request")
+            return self._html(
+                start_response,
+                render_home_page(error=str(exc), config=self.service.config),
+                status="400 Bad Request",
+            )
         except StorageError:
             _LOGGER.exception("web_storage_error=true path=%s", path)
             return self._html(
@@ -470,25 +709,105 @@ class DriftBeaconWebApp:
         body = environ["wsgi.input"].read(length).decode("utf-8", errors="replace")
         form = parse_qs(body, keep_blank_values=True)
         repository_url = (form.get("repository_url") or [""])[0].strip()
-        client_id = str(environ.get("REMOTE_ADDR") or "anonymous")
+        access_code = (form.get("beta_access_code") or [""])[0].strip()
+        client_id = client_source_from_environ(environ, self.service.config.beta)
         try:
-            state = self.service.submit(repository_url, client_id=client_id)
+            state = self.service.submit(
+                repository_url,
+                client_id=client_id,
+                access_code=access_code,
+            )
         except WebSubmissionError as exc:
-            self.service.analytics.record("scan_rejected", {"reason": exc.error_code})
             return self._html(
                 start_response,
-                render_home_page(error=exc.safe_message, repository_url=repository_url),
+                render_home_page(
+                    error=exc.safe_message,
+                    repository_url=repository_url,
+                    config=self.service.config,
+                ),
                 status=exc.http_status,
             )
         except ValueError as exc:
-            self.service.analytics.record("scan_rejected", {"reason": "validation"})
+            self.service.record_event(
+                "scan_rejected",
+                source_hash=self.service.source_hash(client_id),
+                properties={"reason": "validation"},
+            )
             return self._html(
                 start_response,
-                render_home_page(error=str(exc), repository_url=repository_url),
+                render_home_page(
+                    error=str(exc),
+                    repository_url=repository_url,
+                    config=self.service.config,
+                ),
                 status="400 Bad Request",
             )
         start_response("303 See Other", [("Location", f"/scans/{state.scan_id}")])
         return [b""]
+
+    def _submit_feedback(
+        self,
+        environ: WSGIEnvironment,
+        start_response: StartResponse,
+    ) -> Iterable[bytes]:
+        length = int(environ.get("CONTENT_LENGTH") or "0")
+        if length > 8192:
+            return self._html(
+                start_response,
+                render_error_page("Feedback is too large."),
+                status="400 Bad Request",
+            )
+        body = environ["wsgi.input"].read(length).decode("utf-8", errors="replace")
+        form = parse_qs(body, keep_blank_values=True)
+        scan_id = (form.get("scan_id") or [""])[0].strip() or None
+        if scan_id is not None and not valid_scan_id(scan_id):
+            scan_id = None
+        source_hash = self.service.source_hash(
+            client_source_from_environ(environ, self.service.config.beta)
+        )
+        target = f"/scans/{scan_id}" if scan_id else "/sample-report"
+        if (form.get("website") or [""])[0].strip():
+            return self._redirect(start_response, f"{target}?{urlencode({'feedback': 'thanks'})}")
+        try:
+            helpfulness = _validated_choice(
+                (form.get("helpfulness") or [""])[0],
+                {"yes", "partly", "no"},
+                "helpfulness",
+            )
+            changed_priority = _validated_choice(
+                (form.get("changed_priority") or [""])[0],
+                {"yes", "maybe", "no"},
+                "changed priority",
+            )
+            comment = _validated_text((form.get("comment") or [""])[0], "feedback", 2000)
+            email = _validated_text((form.get("email") or [""])[0], "email", 320)
+            consent_to_contact = (form.get("consent_to_contact") or [""])[0] == "yes"
+            private_monitoring_interest = (
+                (form.get("private_monitoring_interest") or [""])[0] == "yes"
+            )
+            self.service.save_feedback(
+                source_hash=source_hash,
+                scan_id=scan_id,
+                helpfulness=helpfulness,
+                changed_priority=changed_priority,
+                private_monitoring_interest=private_monitoring_interest,
+                comment=comment,
+                email=email,
+                consent_to_contact=consent_to_contact,
+            )
+        except WebSubmissionError as exc:
+            return self._html(
+                start_response,
+                render_error_page(exc.safe_message),
+                status=exc.http_status,
+            )
+        except ValueError as exc:
+            return self._html(
+                start_response,
+                render_error_page(str(exc)),
+                status="400 Bad Request",
+            )
+        return self._redirect(start_response, f"{target}?{urlencode({'feedback': 'thanks'})}")
 
     def _api_scan(self, path: str, start_response: StartResponse) -> Iterable[bytes]:
         scan_id = path.removeprefix("/api/scans/").strip("/")
@@ -527,7 +846,12 @@ class DriftBeaconWebApp:
         )
         return [payload]
 
-    def _scan_page(self, path: str, start_response: StartResponse) -> Iterable[bytes]:
+    def _scan_page(
+        self,
+        path: str,
+        start_response: StartResponse,
+        environ: WSGIEnvironment,
+    ) -> Iterable[bytes]:
         parts = [part for part in path.split("/") if part]
         if len(parts) < 2:
             return self._html(start_response, render_not_found_page(), status="404 Not Found")
@@ -547,13 +871,14 @@ class DriftBeaconWebApp:
             return self._html(start_response, render_progress_page(state))
         stored = self.service.load_report(scan_id)
         if stored is not None:
-            self.service.analytics.record("report_viewed", {"scan_id": scan_id})
+            self.service.record_event("report_viewed", scan_id=scan_id)
             return self._html(
                 start_response,
                 render_repository_report_page(
                     stored.scan,
                     stored.comparison,
                     state=state,
+                    feedback_submitted=_query_flag(environ, "feedback", "thanks"),
                 ),
             )
         return self._html(
@@ -578,9 +903,10 @@ class DriftBeaconWebApp:
         if stored is None:
             start_response("404 Not Found", [("Content-Type", "text/plain; charset=utf-8")])
             return [b"artifact not found"]
-        self.service.analytics.record(
+        self.service.record_event(
             "report_downloaded",
-            {"scan_id": state.scan_id, "artifact": artifact},
+            scan_id=state.scan_id,
+            properties={"artifact": artifact},
         )
         if artifact == "report.md":
             return self._download(
@@ -636,6 +962,15 @@ class DriftBeaconWebApp:
             ],
         )
         return [payload]
+
+    def _redirect(self, start_response: StartResponse, location: str) -> Iterable[bytes]:
+        start_response("303 See Other", [("Location", location)])
+        return [b""]
+
+    def _source_hash(self, environ: WSGIEnvironment) -> str:
+        return self.service.source_hash(
+            client_source_from_environ(environ, self.service.config.beta)
+        )
 
     def _download(
         self,
@@ -841,34 +1176,64 @@ def normalise_public_github_url(repository_url: str) -> str:
     return f"https://github.com/{owner}/{repo}.git"
 
 
-def render_home_page(*, error: str | None = None, repository_url: str = "") -> str:
+def render_home_page(
+    *,
+    error: str | None = None,
+    repository_url: str = "",
+    config: WebConfig | None = None,
+) -> str:
     """Render the acquisition homepage."""
 
+    web_config = config or WebConfig()
+    beta = web_config.beta
     error_html = (
-        f'<p class="alert" role="alert">{_escape(error)}</p>'
+        f'<div class="alert" role="alert"><h2>Submission problem</h2><p>{_escape(error)}</p></div>'
         if error is not None
         else ""
     )
+    paused = beta.enabled and not beta.accepting_scans
+    pause_html = (
+        """
+        <div class="notice" role="status">
+          <strong>New scans are temporarily paused while we perform maintenance.</strong>
+          Existing reports remain available.
+        </div>
+        """
+        if paused
+        else ""
+    )
+    access_field = (
+        """
+        <label for="beta_access_code">Beta access code</label>
+        <input id="beta_access_code" name="beta_access_code" type="password"
+          autocomplete="off" inputmode="text" placeholder="Access code" required>
+        """
+        if beta.enabled and beta.access_mode == "invite"
+        else ""
+    )
+    disabled = " disabled" if paused else ""
+    limit_text = _format_bytes(web_config.max_repository_bytes)
     return _page(
         "Know exactly what to fix next to reduce production risk",
         f"""
         <main>
           <section class="hero">
-            <p class="eyebrow">Production-risk prioritisation for public repositories</p>
+            <p class="eyebrow">Controlled public beta</p>
             <h1>Know exactly what to fix next to reduce production risk.</h1>
-            <p class="lead"><strong>Paste a public GitHub repository</strong> and receive a
-            prioritised Production Health report.</p>
-            <p class="lead">DriftBeacon analyses infrastructure and dependency findings, removes
-            test and example noise, and turns the remaining production risks into a prioritised
-            engineering action plan.</p>
+            <p class="lead">Paste a public GitHub repository. DriftBeacon analyses infrastructure
+            and dependency findings, removes non-production noise, and shows what your team should
+            address first.</p>
+            <p><a class="text-link" href="/sample-report">View an example report</a></p>
+            {pause_html}
             <form class="scan-form" method="post" action="/scans">
               <label for="repository_url">Public GitHub repository URL</label>
               <div class="form-row">
                 <input id="repository_url" name="repository_url" type="url"
                   placeholder="https://github.com/owner/repository"
-                  value="{_escape(repository_url)}" required>
-                <button type="submit">Analyse repository</button>
+                  value="{_escape(repository_url)}" required{disabled}>
+                <button type="submit"{disabled}>Analyse repository</button>
               </div>
+              <div class="access-row">{access_field}</div>
               {error_html}
             </form>
           </section>
@@ -876,33 +1241,50 @@ def render_home_page(*, error: str | None = None, repository_url: str = "") -> s
           <section class="band">
             <h2>How it works</h2>
             <div class="steps">
-              <article><strong>1. Paste a repository</strong><span>No workflow file or install in
-              the scanned repository.</span></article>
-              <article><strong>2. DriftBeacon analyses it</strong><span>Checkov and Trivy findings
-              are normalised, deduplicated and separated by production relevance.</span></article>
-              <article><strong>3. Review what to fix first</strong><span>The report leads with
+              <article><strong>1. Submit a public repository</strong><span>No workflow file or
+              install in the scanned repository.</span></article>
+              <article><strong>2. DriftBeacon runs static analysis</strong><span>Infrastructure
+              and dependency findings are normalised, deduplicated and grouped by production
+              relevance.</span></article>
+              <article><strong>3. Review what to fix next</strong><span>The report leads with
               Production Health and ranked engineering actions.</span></article>
             </div>
           </section>
 
+          <section class="band">
+            <h2>Public beta limits</h2>
+            <ul class="plain-list">
+              <li>Public GitHub repositories only.</li>
+              <li>Maximum repository size applies; current limit is {_escape(limit_text)}.</li>
+              <li>Scans may take several minutes and queued scans wait for the worker.</li>
+              <li>Reports are retained for {_escape(web_config.retention_days)} days.</li>
+              <li>Usage is limited during the beta.</li>
+            </ul>
+          </section>
+
           <section class="split">
-            <div>
-              <h2>Different from ordinary scanners</h2>
+            <article>
+              <h2>What this beta does</h2>
               <p>Ordinary scanners tell you everything they found. DriftBeacon helps you decide
-              what your team should fix next.</p>
-            </div>
-            <div>
-              <h2>Continuous monitoring later</h2>
-              <p>Private repository monitoring, scheduled scans, saved history and team workflows
-              are planned paid capabilities. Billing is not part of this public MVP.</p>
-            </div>
+              what your team should fix next by putting production-relevant risk first.</p>
+            </article>
+            <article>
+              <h2>Current scope</h2>
+              <p>The beta supports public GitHub repositories, performs static analysis, does not
+              execute the submitted application and may not identify every vulnerability.</p>
+            </article>
+            <article>
+              <h2>Methodology</h2>
+              <p>DriftBeacon uses Checkov and Trivy scanner output as inputs, then applies its own
+              normalisation, production classification, scoring and prioritisation.</p>
+            </article>
           </section>
 
           <section class="methodology-note">
-            <h2>What Production Health means</h2>
-            <p>Production Health is a prioritisation and trend metric based on findings detected by
-            completed scanners. It does not prove that a repository or production environment is
-            secure.</p>
+            <h2>Important limitations</h2>
+            <p>Production Health is a prioritisation and trend metric. It does not prove that a
+            repository or production environment is secure. Reports are temporary and visible to
+            anyone with the link.</p>
           </section>
         </main>
         """,
@@ -912,8 +1294,16 @@ def render_home_page(*, error: str | None = None, repository_url: str = "") -> s
 def render_progress_page(state: WebScanState) -> str:
     """Render queued/running/failed scan states."""
 
+    safe_failure = _safe_failure_message(state)
     failure = (
-        f"<p class=\"alert\" role=\"alert\">{_escape(state.safe_error_message or state.message)}</p>"
+        f"""
+        <div class="alert" role="alert">
+          <h2>Scan could not complete</h2>
+          <p>{_escape(safe_failure)}</p>
+          <p>Try a smaller public GitHub repository, review the beta limits, or view the example
+          report to see the expected output.</p>
+        </div>
+        """
         if state.status == "failed"
         else ""
     )
@@ -926,7 +1316,6 @@ def render_progress_page(state: WebScanState) -> str:
             const data = await response.json();
             document.querySelector('[data-status]').textContent = data.status;
             document.querySelector('[data-message]').textContent = data.message;
-            document.querySelector('progress').value = data.progress;
             if (data.status === 'completed' || data.status === 'failed' || data.status === 'expired') {
               window.location.reload();
             }
@@ -944,12 +1333,17 @@ def render_progress_page(state: WebScanState) -> str:
           <a class="back-link" href="/">Start another scan</a>
           <section class="panel">
             <p class="eyebrow">Repository analysis</p>
-            <h1>{_escape(state.repository_url)}</h1>
+            <h1>{_escape(state.repository_label)}</h1>
             <dl class="status-grid">
               <div><dt>Status</dt><dd data-status>{_escape(state.status)}</dd></div>
-              <div><dt>Message</dt><dd data-message>{_escape(state.message)}</dd></div>
+              <div><dt>Current stage</dt><dd data-message>{_escape(_stage_label(state))}</dd></div>
+              <div><dt>Elapsed</dt><dd>{_escape(_elapsed_text(state.created_at))}</dd></div>
             </dl>
-            <progress max="100" value="{state.progress}"></progress>
+            <ol class="step-list" aria-label="Scan progress">
+              {_progress_steps(state.status)}
+            </ol>
+            <p class="unavailable">This page updates automatically. You can also
+            <a class="text-link" href="/scans/{state.scan_id}">refresh manually</a>.</p>
             {failure}
           </section>
         </main>
@@ -963,15 +1357,18 @@ def render_repository_report_page(
     comparison: ComparisonSummary,
     *,
     state: WebScanState | None = None,
+    feedback_submitted: bool = False,
+    sample: bool = False,
 ) -> str:
     """Render a web report that emphasizes Production Health and next actions."""
 
     summary = scan.summary
     top_items = prioritise_findings(_web_priority_candidates(scan.findings), limit=3)
+    finding_notice = _finding_state_notice(scan)
     priority_cards = "\n".join(
         _priority_card(index, item, comparison.has_baseline)
         for index, item in enumerate(top_items, start=1)
-    ) or '<p class="empty">No active findings were detected by completed scanners.</p>'
+    ) or f'<p class="empty">{_escape(_empty_findings_text(scan))}</p>'
     scanner_status = "\n".join(
         f"<li><strong>{_escape(status.name.capitalize())}:</strong> "
         f"{_escape(status.status.capitalize())} - {_escape(status.message)}</li>"
@@ -986,12 +1383,24 @@ def render_repository_report_page(
     provisional = " Provisional grade." if summary.get("production_grade_provisional") is True else ""
     retention_notice = _retention_notice(state)
     actions = _report_actions(state)
+    sample_notice = (
+        """
+        <div class="notice" role="status">
+          <strong>Example report.</strong> This page uses generated fixture data and does not
+          describe a real organisation.
+        </div>
+        """
+        if sample
+        else ""
+    )
+    scan_id = state.scan_id if state is not None else None
     return _page(
         f"DriftBeacon report for {scan.repository}",
         f"""
         <main>
           <a class="back-link" href="/">Analyse another repository</a>
           <section class="report-status">
+            {sample_notice}
             <h1>{_escape(scan.repository)}</h1>
             {actions}
             {retention_notice}
@@ -1011,6 +1420,7 @@ def render_repository_report_page(
               <p class="score">{_escape(production_health)}</p>
               <p class="grade">Grade {_escape(production_grade)}{_escape(provisional)}</p>
               <p>{_escape(str(summary.get("production_score_reason", "No production score reason recorded.")))}</p>
+              {finding_notice}
             </div>
             <aside>
               <h2>Overall Health</h2>
@@ -1021,10 +1431,11 @@ def render_repository_report_page(
           </section>
 
           <section class="methodology-note">
-            <h2>Methodology</h2>
+            <h2>Methodology and limitations</h2>
             <p>Production Health is a prioritisation and trend metric based on findings detected by
             completed scanners. It does not prove that a repository or production environment is
-            secure. Path classification is heuristic and should be reviewed.</p>
+            secure. Path classification is heuristic and should be reviewed. Static analysis can
+            produce false positives and false negatives.</p>
           </section>
 
           <section>
@@ -1068,6 +1479,236 @@ def render_repository_report_page(
                 <ul>{scanner_status}</ul>
               </article>
             </div>
+          </section>
+
+          <section class="methodology-note">
+            <h2>Private monitoring interest</h2>
+            <p>Want continuous monitoring for private repositories?</p>
+            <p>DriftBeacon plans to support private GitHub repositories, scan history, Production
+            Health trends and Slack alerts.</p>
+            <p><a class="button-link" href="#feedback" data-interest-link>Register interest</a></p>
+          </section>
+
+          {_feedback_form(scan_id=scan_id, submitted=feedback_submitted, sample=sample)}
+          <script>
+            const interestLink = document.querySelector('[data-interest-link]');
+            if (interestLink) {{
+              interestLink.addEventListener('click', () => {{
+                const interestBox = document.getElementById('private_monitoring_interest');
+                if (interestBox) interestBox.checked = true;
+              }});
+            }}
+          </script>
+        </main>
+        """,
+    )
+
+
+def render_sample_report_page(*, feedback_submitted: bool = False) -> str:
+    """Render a static example report without creating a scan record."""
+
+    scan, comparison = sample_report_data()
+    return render_repository_report_page(
+        scan,
+        comparison,
+        feedback_submitted=feedback_submitted,
+        sample=True,
+    )
+
+
+def sample_report_data() -> tuple[ScanResult, ComparisonSummary]:
+    """Generated fixture data for the public beta sample report."""
+
+    scan = ScanResult.from_dict(
+        {
+            "repository": "example/public-infra-demo",
+            "branch": "main",
+            "commit_sha": "example000000",
+            "started_at": "2026-07-24T09:00:00+00:00",
+            "completed_at": "2026-07-24T09:01:12+00:00",
+            "scanner_statuses": {
+                "checkov": {
+                    "name": "checkov",
+                    "status": "success",
+                    "message": "Loaded generated Terraform and Kubernetes fixture findings.",
+                    "duration_seconds": 18.4,
+                },
+                "trivy": {
+                    "name": "trivy",
+                    "status": "success",
+                    "message": "Loaded generated container and dependency fixture findings.",
+                    "duration_seconds": 21.9,
+                },
+            },
+            "findings": [
+                {
+                    "id": "sample-public-s3",
+                    "scanner": "checkov",
+                    "rule_id": "CKV_AWS_20",
+                    "title": "S3 bucket allows public read access",
+                    "description": "Generated fixture showing public object access.",
+                    "severity": "high",
+                    "category": "storage",
+                    "file_path": "terraform/production/s3.tf",
+                    "line_start": 7,
+                    "resource": "aws_s3_bucket.demo",
+                    "status": "new",
+                    "first_seen": "2026-07-24T09:00:00+00:00",
+                    "last_seen": "2026-07-24T09:01:12+00:00",
+                    "fingerprint": "sample-public-s3",
+                    "remediation": "Disable public ACLs and enable S3 Block Public Access.",
+                    "finding_family": "storage",
+                    "directory_group": "production",
+                },
+                {
+                    "id": "sample-privileged-pod",
+                    "scanner": "checkov",
+                    "rule_id": "CKV_K8S_16",
+                    "title": "Container runs as privileged",
+                    "description": "Generated fixture showing a privileged Kubernetes workload.",
+                    "severity": "critical",
+                    "category": "container",
+                    "file_path": "k8s/production/deployment.yaml",
+                    "line_start": 22,
+                    "resource": "Deployment/demo",
+                    "status": "new",
+                    "first_seen": "2026-07-24T09:00:00+00:00",
+                    "last_seen": "2026-07-24T09:01:12+00:00",
+                    "fingerprint": "sample-privileged-pod",
+                    "remediation": "Disable privileged mode and run with the least required capabilities.",
+                    "finding_family": "container",
+                    "directory_group": "production",
+                },
+                {
+                    "id": "sample-dev-vuln",
+                    "scanner": "trivy",
+                    "rule_id": "CVE-2099-0001",
+                    "title": "Generated dependency vulnerability",
+                    "description": "Generated fixture showing dependency risk outside production paths.",
+                    "severity": "medium",
+                    "category": "dependency",
+                    "file_path": "examples/package-lock.json",
+                    "line_start": 1,
+                    "resource": "demo-package",
+                    "status": "new",
+                    "first_seen": "2026-07-24T09:00:00+00:00",
+                    "last_seen": "2026-07-24T09:01:12+00:00",
+                    "fingerprint": "sample-dev-vuln",
+                    "remediation": "Update the dependency when the example fixture is promoted to production use.",
+                    "finding_family": "dependency",
+                    "directory_group": "examples",
+                    "excluded_from_score": True,
+                    "score_exclusion_reason": "Example path",
+                },
+            ],
+            "health_score": 72,
+            "summary": {
+                "coverage_state": "complete_coverage",
+                "production_coverage_state": "complete_coverage",
+                "production_health_score": 58,
+                "production_grade": "F",
+                "production_grade_provisional": False,
+                "production_score_reason": (
+                    "Production Health reflects critical and high findings in production paths."
+                ),
+                "production_actionable_findings": 2,
+                "production_critical_findings": 1,
+                "production_high_findings": 1,
+                "production_medium_findings": 0,
+                "production_low_findings": 0,
+                "finding_source_breakdown": {
+                    "checkov": {
+                        "critical": 1,
+                        "high": 1,
+                        "medium": 0,
+                        "low": 0,
+                        "total_actionable": 2,
+                    },
+                    "trivy": {
+                        "critical": 0,
+                        "high": 0,
+                        "medium": 1,
+                        "low": 0,
+                        "total_actionable": 1,
+                    },
+                },
+                "directory_group_breakdown": {
+                    "production": {
+                        "critical": 1,
+                        "high": 1,
+                        "medium": 0,
+                        "low": 0,
+                        "total_actionable": 2,
+                    },
+                    "examples": {
+                        "critical": 0,
+                        "high": 0,
+                        "medium": 1,
+                        "low": 0,
+                        "total_actionable": 1,
+                    },
+                },
+            },
+        }
+    )
+    comparison = compare_scans(scan, None)
+    return scan, comparison
+
+
+def render_privacy_page() -> str:
+    return _page(
+        "Beta data and privacy information",
+        """
+        <main class="narrow">
+          <a class="back-link" href="/">Back to DriftBeacon</a>
+          <section class="panel">
+            <p class="eyebrow">Controlled beta</p>
+            <h1>Beta data and privacy information</h1>
+            <p>This is practical information for testers, not a professionally reviewed legal
+            privacy policy.</p>
+            <ul class="plain-list">
+              <li>Submitted public GitHub repository URLs are stored with scan metadata.</li>
+              <li>Public repository source is cloned temporarily for scanning and deleted after
+              the worker finishes.</li>
+              <li>Report contents and scan metadata are retained for the configured retention
+              period.</li>
+              <li>Report links are public to anyone who has the URL.</li>
+              <li>Feedback is stored locally to improve the beta. Email is optional and is only
+              retained when contact consent is provided.</li>
+              <li>Server logs may contain request metadata but DriftBeacon does not intentionally
+              store raw IP addresses in beta usage counters.</li>
+              <li>Private repository scanning is not supported in this beta.</li>
+              <li>DriftBeacon does not sell beta feedback or scan data.</li>
+              <li>Contact Rob to request deletion of beta feedback or report data where
+              applicable.</li>
+            </ul>
+          </section>
+        </main>
+        """,
+    )
+
+
+def render_acceptable_use_page() -> str:
+    return _page(
+        "Beta acceptable use",
+        """
+        <main class="narrow">
+          <a class="back-link" href="/">Back to DriftBeacon</a>
+          <section class="panel">
+            <p class="eyebrow">Controlled beta</p>
+            <h1>Beta acceptable use</h1>
+            <p>These beta terms are intentionally concise and should be professionally reviewed
+            before any commercial launch.</p>
+            <ul class="plain-list">
+              <li>Only submit repositories you are permitted to analyse.</li>
+              <li>Do not deliberately abuse the service or attempt to bypass beta limits.</li>
+              <li>Do not submit malicious payloads, excessive automated submissions, private
+              credentials or tokens.</li>
+              <li>Do not treat a DriftBeacon report as a guarantee of security.</li>
+              <li>Automated findings can contain false positives and false negatives.</li>
+              <li>DriftBeacon is not a substitute for professional security review.</li>
+              <li>Availability is not guaranteed during beta testing.</li>
+            </ul>
           </section>
         </main>
         """,
@@ -1130,15 +1771,18 @@ def _report_actions(state: WebScanState | None) -> str:
     return f"""
     <div class="report-actions">
       <button type="button" data-copy-report>Copy report link</button>
+      <span class="copy-status" aria-live="polite" data-copy-status></span>
       <a class="button-link" href="/scans/{state.scan_id}/report.md">Download Markdown</a>
       <a class="button-link secondary" href="/scans/{state.scan_id}/report.json">Download JSON</a>
     </div>
     <script>
       const copyButton = document.querySelector('[data-copy-report]');
+      const copyStatus = document.querySelector('[data-copy-status]');
       if (copyButton) {{
         copyButton.addEventListener('click', async () => {{
           await navigator.clipboard.writeText(window.location.href);
           copyButton.textContent = 'Copied';
+          if (copyStatus) copyStatus.textContent = 'Report link copied.';
         }});
       }}
     </script>
@@ -1152,6 +1796,166 @@ def _retention_notice(state: WebScanState | None) -> str:
         '<p class="retention-note">This public report is available until '
         f"{_escape(_date_text(state.expires_at))}. Anyone with this link can view it.</p>"
     )
+
+
+def _feedback_form(
+    *,
+    scan_id: str | None,
+    submitted: bool,
+    sample: bool,
+) -> str:
+    thanks = (
+        '<div class="notice" role="status"><strong>Thanks.</strong> Your beta feedback was recorded.</div>'
+        if submitted
+        else ""
+    )
+    scan_input = (
+        f'<input type="hidden" name="scan_id" value="{_escape(scan_id)}">'
+        if scan_id is not None
+        else ""
+    )
+    context = (
+        "This feedback is for the example report."
+        if sample
+        else "This feedback is linked to this scan report."
+    )
+    return f"""
+    <section id="feedback" class="feedback-section">
+      <h2>Did this report help you decide what to fix?</h2>
+      <p class="unavailable">{_escape(context)}</p>
+      {thanks}
+      <form method="post" action="/feedback" class="feedback-form">
+        {scan_input}
+        <div class="honeypot" aria-hidden="true">
+          <label for="website">Website</label>
+          <input id="website" name="website" type="text" tabindex="-1" autocomplete="off">
+        </div>
+        <fieldset>
+          <legend>Was the report helpful?</legend>
+          <label><input type="radio" name="helpfulness" value="yes" required> Yes</label>
+          <label><input type="radio" name="helpfulness" value="partly"> Partly</label>
+          <label><input type="radio" name="helpfulness" value="no"> No</label>
+        </fieldset>
+        <fieldset>
+          <legend>Would this change what you worked on?</legend>
+          <label><input type="radio" name="changed_priority" value="yes" required> Yes</label>
+          <label><input type="radio" name="changed_priority" value="maybe"> Maybe</label>
+          <label><input type="radio" name="changed_priority" value="no"> No</label>
+        </fieldset>
+        <label for="comment">What was useful, confusing or missing?</label>
+        <textarea id="comment" name="comment" maxlength="2000" rows="4"></textarea>
+        <label class="check-row">
+          <input id="private_monitoring_interest" type="checkbox" name="private_monitoring_interest" value="yes">
+          I am interested in continuous monitoring for private repositories.
+        </label>
+        <label for="email">Email address, optional</label>
+        <input id="email" name="email" type="email" maxlength="320" autocomplete="email">
+        <label class="check-row">
+          <input type="checkbox" name="consent_to_contact" value="yes">
+          DriftBeacon may contact me about this beta.
+        </label>
+        <p class="unavailable">Feedback is stored to help improve the DriftBeacon beta. Your email
+        is optional and will only be used to contact you about DriftBeacon if you provide consent.
+        See <a class="text-link" href="/privacy">beta data and privacy information</a>.</p>
+        <button type="submit">Send feedback</button>
+      </form>
+    </section>
+    """
+
+
+def _finding_state_notice(scan: ScanResult) -> str:
+    summary = scan.summary
+    coverage = str(summary.get("production_coverage_state") or summary.get("coverage_state", ""))
+    if coverage == "not_scored_no_supported_files":
+        return (
+            '<div class="notice" role="status"><strong>No eligible scan targets were found.</strong> '
+            "DriftBeacon did not find supported infrastructure or dependency files in this "
+            "repository, so a meaningful Production Health score could not be calculated.</div>"
+        )
+    if coverage == "not_scored_all_scanners_failed":
+        return (
+            '<div class="alert" role="alert"><strong>Scanner coverage failed.</strong> '
+            "A meaningful Production Health score could not be calculated because all applicable "
+            "scanners failed.</div>"
+        )
+    if coverage == "partial_coverage":
+        return (
+            '<div class="notice" role="status"><strong>Partial scanner coverage.</strong> '
+            "The score is provisional because at least one applicable scanner did not complete.</div>"
+        )
+    if scan.health_score is not None and not _web_priority_candidates(scan.findings):
+        return (
+            '<div class="notice" role="status"><strong>No active findings were detected.</strong> '
+            "This means completed scanners did not report actionable findings in the analysed "
+            "targets; it does not prove the repository is secure.</div>"
+        )
+    return ""
+
+
+def _empty_findings_text(scan: ScanResult) -> str:
+    coverage = str(
+        scan.summary.get("production_coverage_state") or scan.summary.get("coverage_state", "")
+    )
+    if coverage == "not_scored_no_supported_files":
+        return "No eligible scan targets were found."
+    if coverage == "not_scored_all_scanners_failed":
+        return "No prioritised findings are available because scanner coverage failed."
+    if scan.health_score is None:
+        return "No prioritised findings are available because this repository was not scored."
+    return "No active findings were detected by completed scanners."
+
+
+def _stage_label(state: WebScanState) -> str:
+    labels = {
+        "queued": "Queued",
+        "cloning": "Cloning repository and checking repository limits",
+        "analysing": "Analysing infrastructure and dependencies",
+        "generating_report": "Preparing prioritised report",
+        "completed": "Completed",
+        "failed": "Failed safely",
+        "expired": "Expired",
+    }
+    return labels.get(state.status, state.message)
+
+
+def _progress_steps(status: str) -> str:
+    steps = [
+        ("queued", "Queued"),
+        ("cloning", "Cloning repository"),
+        ("analysing", "Checking repository limits and analysing findings"),
+        ("generating_report", "Preparing prioritised report"),
+        ("completed", "Completed"),
+    ]
+    order = {key: index for index, (key, _label) in enumerate(steps)}
+    current = order.get(status, len(steps) - 1 if status == "completed" else 0)
+    items = []
+    for index, (_key, label) in enumerate(steps):
+        state = "complete" if index < current else "current" if index == current else "waiting"
+        if status == "failed" and index == current:
+            state = "failed"
+        items.append(
+            f'<li class="{state}"><span>{_escape(label)}</span><small>{_escape(state)}</small></li>'
+        )
+    return "\n".join(items)
+
+
+def _safe_failure_message(state: WebScanState) -> str:
+    messages = {
+        "repository_not_found": "This repository could not be cloned. Confirm it is public and exists.",
+        "repository_private": "This repository could not be cloned. Confirm it is public and exists.",
+        "repository_too_large": "This repository exceeds the size limit for the public beta.",
+        "repository_file_limit_exceeded": "This repository exceeds the file-count limit for the public beta.",
+        "clone_timeout": "Git clone exceeded the public beta time limit.",
+        "scan_timeout": "This scan exceeded the public beta time limit.",
+        "scanner_failure": "Scan failed. Please try again with a smaller public repository.",
+        "report_generation_failed": "The scan completed, but DriftBeacon could not store the report.",
+        "scan_interrupted": "The scan was interrupted before completion.",
+    }
+    if state.error_code in messages:
+        return messages[state.error_code]
+    if state.status == "failed":
+        return "Scan failed. Please try again with a smaller public repository."
+    return state.safe_error_message or state.message
 
 
 def _web_priority_candidates(findings: list[Finding]) -> list[Finding]:
@@ -1278,17 +2082,27 @@ def _table(rows: list[tuple[str, int, int, int, int, int]], label: str) -> str:
 
 
 def _page(title: str, body: str) -> str:
+    description = "DriftBeacon prioritises public repository findings by Production Health."
     return f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="{_escape(description)}">
+  <meta property="og:title" content="{_escape(title)} - DriftBeacon">
+  <meta property="og:description" content="{_escape(description)}">
   <title>{_escape(title)} - DriftBeacon</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23176b56'/%3E%3Cpath d='M8 21h16l-8-12z' fill='white'/%3E%3C/svg%3E">
   <style>{_css()}</style>
 </head>
 <body>
   <header class="site-header"><a href="/">DriftBeacon</a><span>Production Health reports</span></header>
   {body}
+  <footer class="site-footer">
+    <a href="/sample-report">Example report</a>
+    <a href="/privacy">Beta data and privacy</a>
+    <a href="/acceptable-use">Acceptable use</a>
+  </footer>
 </body>
 </html>
 """
@@ -1303,7 +2117,8 @@ def _css() -> str:
       color:var(--ink); background:var(--paper); line-height:1.5; }
     .site-header { display:flex; justify-content:space-between; align-items:center; padding:18px clamp(18px,4vw,48px);
       border-bottom:1px solid var(--line); background:#fff; }
-    .site-header a { color:var(--ink); text-decoration:none; font-weight:800; }
+    .site-header a, .text-link { color:var(--accent); text-decoration-thickness:2px; text-underline-offset:3px; font-weight:800; }
+    .site-header a { color:var(--ink); text-decoration:none; }
     .site-header span, .eyebrow, dt { color:var(--muted); font-size:0.86rem; }
     main { max-width:1120px; margin:0 auto; padding:34px clamp(18px,4vw,48px) 64px; }
     .narrow { max-width:760px; }
@@ -1313,14 +2128,20 @@ def _css() -> str:
     h3 { margin:0 0 12px; font-size:1.08rem; }
     .lead { font-size:1.2rem; max-width:760px; color:#2d3a33; }
     .scan-form { margin-top:28px; }
-    label { display:block; font-weight:700; margin-bottom:8px; }
+    label, legend { display:block; font-weight:700; margin-bottom:8px; }
     .form-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; max-width:760px; }
-    input { width:100%; min-height:46px; border:1px solid var(--line); border-radius:8px; padding:0 14px; font:inherit; }
+    .access-row { margin-top:14px; max-width:360px; }
+    input, textarea { width:100%; min-height:46px; border:1px solid var(--line); border-radius:8px; padding:0 14px; font:inherit; background:#fff; }
+    textarea { padding:12px 14px; resize:vertical; }
     button, .button-link { min-height:46px; border:0; border-radius:8px; padding:0 18px; font-weight:800; color:#fff; background:var(--accent); cursor:pointer; display:inline-flex; align-items:center; text-decoration:none; }
+    button:disabled, input:disabled { opacity:0.62; cursor:not-allowed; }
+    button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visible {
+      outline:3px solid #f1b24a; outline-offset:3px;
+    }
     .button-link.secondary { background:#2d3a33; }
     .report-actions { display:flex; flex-wrap:wrap; gap:10px; margin:16px 0; }
-    .retention-note { border:1px solid var(--line); border-radius:8px; padding:12px; background:#fff; color:var(--muted); }
-    .band, .split, .methodology-note, .panel, .report-status, .health-focus, .impact, .evidence {
+    .retention-note, .notice { border:1px solid var(--line); border-radius:8px; padding:12px; background:#fff; color:var(--muted); }
+    .band, .split, .methodology-note, .panel, .report-status, .health-focus, .impact, .evidence, .feedback-section {
       border-top:1px solid var(--line); padding:28px 0; }
     .steps, .split, .health-focus, .evidence-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:18px; }
     .split, .health-focus { grid-template-columns:1fr 1fr; }
@@ -1329,7 +2150,11 @@ def _css() -> str:
     .status-grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px; margin:18px 0 0; }
     .status-grid div { border:1px solid var(--line); border-radius:8px; padding:12px; background:#fff; }
     dd { margin:4px 0 0; font-weight:750; overflow-wrap:anywhere; }
-    progress { width:100%; height:18px; margin-top:18px; }
+    .step-list { list-style:none; padding:0; margin:22px 0; display:grid; gap:8px; }
+    .step-list li { display:flex; justify-content:space-between; gap:12px; border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:#fff; }
+    .step-list .complete { border-color:#86b8a5; }
+    .step-list .current { border-color:var(--accent); box-shadow:0 0 0 2px rgba(23,107,86,.12); }
+    .step-list .failed { border-color:#c65a42; }
     .score { font-size:4.2rem; line-height:1; font-weight:900; margin:8px 0; color:var(--accent); }
     .support-score { font-size:1.55rem; font-weight:800; }
     .grade { font-weight:800; color:var(--accent-2); }
@@ -1338,9 +2163,21 @@ def _css() -> str:
     .priority-card dl div { border-top:1px solid var(--line); padding-top:8px; }
     .unavailable, .empty { color:var(--muted); font-size:0.92rem; }
     .alert { border:1px solid #c65a42; background:#fff0ec; color:#7b2718; border-radius:8px; padding:12px; }
+    .alert h2 { font-size:1rem; margin:0 0 6px; }
     .back-link { color:var(--accent); font-weight:800; text-decoration:none; }
-    table { width:100%; border-collapse:collapse; font-size:0.9rem; }
+    .plain-list { padding-left:1.1rem; }
+    .feedback-form { display:grid; gap:16px; max-width:760px; }
+    fieldset { border:1px solid var(--line); border-radius:8px; padding:14px; display:flex; flex-wrap:wrap; gap:12px; }
+    fieldset label, .check-row { display:flex; gap:8px; align-items:center; font-weight:600; margin:0; }
+    fieldset input, .check-row input { width:auto; min-height:0; }
+    .honeypot { position:absolute; left:-10000px; width:1px; height:1px; overflow:hidden; }
+    table { width:100%; border-collapse:collapse; font-size:0.9rem; display:block; overflow-x:auto; }
     th, td { text-align:left; border-bottom:1px solid var(--line); padding:7px 5px; vertical-align:top; }
+    .site-footer { border-top:1px solid var(--line); padding:20px clamp(18px,4vw,48px); display:flex; flex-wrap:wrap; gap:14px; background:#fff; }
+    .site-footer a { color:var(--accent); font-weight:700; }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior:auto !important; transition:none !important; animation:none !important; }
+    }
     @media (max-width:850px) {
       .form-row, .steps, .split, .health-focus, .priority-list, .evidence-grid, .status-grid { grid-template-columns:1fr; }
       h1 { font-size:2.4rem; }
@@ -1411,6 +2248,71 @@ def _escape(value: object) -> str:
     return html.escape(str(value), quote=True)
 
 
+def _date_bucket(value: datetime) -> str:
+    return value.astimezone(UTC).date().isoformat()
+
+
+def _elapsed_text(started_at: datetime) -> str:
+    elapsed = max(0, int((datetime.now(UTC) - started_at.astimezone(UTC)).total_seconds()))
+    if elapsed < 60:
+        return f"{elapsed} seconds"
+    minutes, seconds = divmod(elapsed, 60)
+    if minutes < 60:
+        return f"{minutes} minutes {seconds} seconds"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} hours {minutes} minutes"
+
+
+def _format_bytes(value: int) -> str:
+    if value >= 1024 * 1024:
+        return f"{round(value / (1024 * 1024))} MB"
+    if value >= 1024:
+        return f"{round(value / 1024)} KB"
+    return f"{value} bytes"
+
+
+def _validated_choice(value: str, allowed: set[str], label: str) -> str:
+    candidate = value.strip().lower()
+    if candidate not in allowed:
+        raise ValueError(f"Choose a valid {label} option.")
+    return candidate
+
+
+def _validated_text(value: str, label: str, max_length: int) -> str:
+    text = value.strip()
+    if len(text) > max_length:
+        raise ValueError(f"{label.capitalize()} is too long.")
+    return text
+
+
+def _query_flag(environ: WSGIEnvironment, key: str, expected: str) -> bool:
+    values = parse_qs(str(environ.get("QUERY_STRING") or ""), keep_blank_values=True)
+    return (values.get(key) or [""])[0] == expected
+
+
+def hash_submission_source(source: str, secret: str) -> str:
+    normalised = source.strip().lower() or "anonymous"
+    return hmac.new(secret.encode("utf-8"), normalised.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def client_source_from_environ(environ: WSGIEnvironment, beta: BetaConfig) -> str:
+    remote = _normalise_ip(str(environ.get("REMOTE_ADDR") or ""))
+    if remote and remote in beta.trusted_proxy_ips:
+        forwarded = str(environ.get("HTTP_X_FORWARDED_FOR") or "")
+        candidate = forwarded.split(",", 1)[0].strip()
+        normalised = _normalise_ip(candidate)
+        if normalised:
+            return normalised
+    return remote or "anonymous"
+
+
+def _normalise_ip(value: str) -> str:
+    try:
+        return str(ipaddress.ip_address(value.strip()))
+    except ValueError:
+        return ""
+
+
 def _env_int(env: dict[str, str], key: str, default: int) -> int:
     value = env.get(key)
     if value is None or not value.strip():
@@ -1419,3 +2321,27 @@ def _env_int(env: dict[str, str], key: str, default: int) -> int:
         return int(value)
     except ValueError as exc:
         raise ValueError(f"{key} must be an integer") from exc
+
+
+def _env_bool(env: dict[str, str], key: str, default: bool) -> bool:
+    value = env.get(key)
+    if value is None or not value.strip():
+        return default
+    normalised = value.strip().lower()
+    if normalised in {"1", "true", "yes", "on"}:
+        return True
+    if normalised in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{key} must be a boolean")
+
+
+def _env_list(
+    env: dict[str, str],
+    key: str,
+    *,
+    default: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    value = env.get(key)
+    if value is None or not value.strip():
+        return default
+    return tuple(part.strip() for part in re.split(r"[,\n]", value) if part.strip())

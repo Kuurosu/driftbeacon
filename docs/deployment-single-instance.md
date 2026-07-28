@@ -109,11 +109,33 @@ DRIFTBEACON_WEB_MAX_QUEUED_SCANS=10
 DRIFTBEACON_WEB_MAX_SCAN_SECONDS=300
 DRIFTBEACON_WEB_MAX_REPOSITORY_BYTES=157286400
 DRIFTBEACON_WEB_MAX_REPOSITORY_FILES=8000
+DRIFTBEACON_BETA_ENABLED=true
+DRIFTBEACON_BETA_ACCESS_MODE=invite
+DRIFTBEACON_BETA_ACCESS_CODES=comma-separated-random-codes
+DRIFTBEACON_BETA_ACCEPTING_SCANS=true
+DRIFTBEACON_BETA_MAX_SCANS_PER_IP_PER_DAY=3
+DRIFTBEACON_BETA_MAX_TOTAL_SCANS_PER_DAY=25
+DRIFTBEACON_RATE_LIMIT_SECRET=long-random-value
+DRIFTBEACON_TRUSTED_PROXY_IPS=127.0.0.1
 DRIFTBEACON_WORKER_POLL_SECONDS=2
 DRIFTBEACON_WORKER_STALE_SECONDS=600
 ```
 
-Do not put secrets, private keys or certificates in `.env`.
+Do not commit `.env`. Beta access codes and the rate-limit secret belong only in host configuration.
+
+Pause new scan submissions without removing existing reports:
+
+```sh
+DRIFTBEACON_BETA_ACCEPTING_SCANS=false
+docker compose up -d web
+```
+
+Resume submissions:
+
+```sh
+DRIFTBEACON_BETA_ACCEPTING_SCANS=true
+docker compose up -d web
+```
 
 ## 9. Build
 
@@ -156,6 +178,7 @@ Readiness checks SQLite schema access and report-store writability. It does not 
 ```sh
 DRIFTBEACON_SMOKE_BASE_URL=http://127.0.0.1:8080 \
 DRIFTBEACON_SMOKE_REPOSITORY=https://github.com/Kuurosu/driftbeacon \
+DRIFTBEACON_SMOKE_ACCESS_CODE=one-of-your-beta-codes \
 ./scripts/smoke-web.sh
 ```
 
@@ -199,18 +222,15 @@ docker system df
 docker volume ls
 ```
 
-SQLite contains queued, running and failed scan counts. Query from a maintenance shell only:
+SQLite contains queued, running, failed, feedback and beta usage counts. Prefer the admin CLI:
 
 ```sh
-docker compose exec web python - <<'PY'
-from driftbeacon.web import WebConfig
-from driftbeacon.web_storage import SQLiteScanStore
-store = SQLiteScanStore(WebConfig.from_environment().database_path)
-print({"queued": store.count_queued_scans(), "running": store.count_running_scans()})
-PY
+docker compose exec web driftbeacon beta-status --output-dir /data
+docker compose exec web driftbeacon beta-failed-scans --output-dir /data --limit 20
+docker compose exec web driftbeacon feedback-export --output-dir /data --output /data/feedback.csv
 ```
 
-Do not expose these operational details publicly without authentication.
+Do not expose these operational details or feedback exports publicly without authentication.
 
 ## 17. Backup
 

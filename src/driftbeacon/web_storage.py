@@ -7,6 +7,7 @@ import re
 import shutil
 import sqlite3
 import tempfile
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,7 +17,7 @@ from .models import ComparisonSummary, Finding, ScanResult
 from .storage import StorageError
 
 WEB_REPORT_FORMAT_VERSION = "web-report-v1"
-WEB_SCHEMA_VERSION = 2
+WEB_SCHEMA_VERSION = 3
 
 ScanStatus = Literal[
     "queued",
@@ -112,6 +113,32 @@ class WebScanState:
             "error_code": self.error_code,
             "error": self.safe_error_message,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class SubmissionLimitResult:
+    """Result of recording one beta submission attempt."""
+
+    allowed: bool
+    reason: str | None
+    accepted_today: int
+    rejected_today: int
+
+
+@dataclass(frozen=True, slots=True)
+class FeedbackRecord:
+    """Local beta feedback submission."""
+
+    feedback_id: str
+    created_at: datetime
+    scan_id: str | None
+    source_hash: str
+    helpfulness: str
+    changed_priority: str
+    private_monitoring_interest: bool
+    comment: str
+    email: str | None
+    consent_to_contact: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -444,6 +471,331 @@ class SQLiteScanStore:
             ).fetchone()
         return int(row["count"]) if row is not None else 0
 
+    def count_completed_scans_on(self, date_bucket: str) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM scans
+                WHERE status = 'completed'
+                  AND substr(completed_at, 1, 10) = ?
+                """,
+                (date_bucket,),
+            ).fetchone()
+        return int(row["count"]) if row is not None else 0
+
+    def count_failed_scans_on(self, date_bucket: str) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM scans
+                WHERE status = 'failed'
+                  AND substr(completed_at, 1, 10) = ?
+                """,
+                (date_bucket,),
+            ).fetchone()
+        return int(row["count"]) if row is not None else 0
+
+    def record_submission_attempt(
+        self,
+        *,
+        source_hash: str,
+        date_bucket: str,
+        max_source_accepts: int,
+        max_total_accepts: int,
+    ) -> SubmissionLimitResult:
+        """Atomically enforce and record single-instance beta daily scan limits."""
+
+        now = _format_datetime(datetime.now(UTC))
+        with self._connect() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                source_row = connection.execute(
+                    """
+                    SELECT accepted_scan_count, rejected_scan_count
+                    FROM beta_usage_counters
+                    WHERE source_hash = ?
+                      AND date_bucket = ?
+                    """,
+                    (source_hash, date_bucket),
+                ).fetchone()
+                source_accepted = (
+                    int(source_row["accepted_scan_count"]) if source_row is not None else 0
+                )
+                total_row = connection.execute(
+                    """
+                    SELECT COALESCE(SUM(accepted_scan_count), 0) AS accepted,
+                           COALESCE(SUM(rejected_scan_count), 0) AS rejected
+                    FROM beta_usage_counters
+                    WHERE date_bucket = ?
+                    """,
+                    (date_bucket,),
+                ).fetchone()
+                total_accepted = int(total_row["accepted"]) if total_row is not None else 0
+                total_rejected = int(total_row["rejected"]) if total_row is not None else 0
+                reason: str | None = None
+                if source_accepted >= max_source_accepts:
+                    reason = "source_daily_limit"
+                elif total_accepted >= max_total_accepts:
+                    reason = "global_daily_limit"
+                allowed = reason is None
+                accepted_increment = 1 if allowed else 0
+                rejected_increment = 0 if allowed else 1
+                connection.execute(
+                    """
+                    INSERT INTO beta_usage_counters (
+                      source_hash, date_bucket, accepted_scan_count,
+                      rejected_scan_count, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(source_hash, date_bucket) DO UPDATE SET
+                      accepted_scan_count = accepted_scan_count + excluded.accepted_scan_count,
+                      rejected_scan_count = rejected_scan_count + excluded.rejected_scan_count,
+                      updated_at = excluded.updated_at
+                    """,
+                    (
+                        source_hash,
+                        date_bucket,
+                        accepted_increment,
+                        rejected_increment,
+                        now,
+                    ),
+                )
+                connection.execute("COMMIT")
+            except sqlite3.Error:
+                connection.execute("ROLLBACK")
+                raise
+        return SubmissionLimitResult(
+            allowed=allowed,
+            reason=reason,
+            accepted_today=total_accepted + accepted_increment,
+            rejected_today=total_rejected + rejected_increment,
+        )
+
+    def record_rejected_submission(self, *, source_hash: str, date_bucket: str) -> None:
+        now = _format_datetime(datetime.now(UTC))
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO beta_usage_counters (
+                  source_hash, date_bucket, accepted_scan_count,
+                  rejected_scan_count, updated_at
+                ) VALUES (?, ?, 0, 1, ?)
+                ON CONFLICT(source_hash, date_bucket) DO UPDATE SET
+                  rejected_scan_count = rejected_scan_count + 1,
+                  updated_at = excluded.updated_at
+                """,
+                (source_hash, date_bucket, now),
+            )
+
+    def daily_submission_counts(self, date_bucket: str) -> dict[str, int]:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COALESCE(SUM(accepted_scan_count), 0) AS accepted,
+                       COALESCE(SUM(rejected_scan_count), 0) AS rejected
+                FROM beta_usage_counters
+                WHERE date_bucket = ?
+                """,
+                (date_bucket,),
+            ).fetchone()
+        return {
+            "accepted": int(row["accepted"]) if row is not None else 0,
+            "rejected": int(row["rejected"]) if row is not None else 0,
+        }
+
+    def source_daily_usage(self, *, source_hash: str, date_bucket: str) -> dict[str, int]:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT accepted_scan_count, rejected_scan_count
+                FROM beta_usage_counters
+                WHERE source_hash = ?
+                  AND date_bucket = ?
+                """,
+                (source_hash, date_bucket),
+            ).fetchone()
+        return {
+            "accepted": int(row["accepted_scan_count"]) if row is not None else 0,
+            "rejected": int(row["rejected_scan_count"]) if row is not None else 0,
+        }
+
+    def save_feedback(self, feedback: FeedbackRecord) -> None:
+        validate_feedback_id(feedback.feedback_id)
+        if feedback.scan_id is not None:
+            validate_scan_id(feedback.scan_id)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO beta_feedback (
+                  feedback_id, scan_id, created_at, source_hash, helpfulness,
+                  changed_priority, private_monitoring_interest, comment, email,
+                  consent_to_contact
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    feedback.feedback_id,
+                    feedback.scan_id,
+                    _format_datetime(feedback.created_at),
+                    feedback.source_hash,
+                    feedback.helpfulness,
+                    feedback.changed_priority,
+                    1 if feedback.private_monitoring_interest else 0,
+                    feedback.comment,
+                    feedback.email,
+                    1 if feedback.consent_to_contact else 0,
+                ),
+            )
+
+    def count_feedback_on(self, date_bucket: str) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM beta_feedback
+                WHERE substr(created_at, 1, 10) = ?
+                """,
+                (date_bucket,),
+            ).fetchone()
+        return int(row["count"]) if row is not None else 0
+
+    def count_feedback_from_source_on(self, *, source_hash: str, date_bucket: str) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM beta_feedback
+                WHERE source_hash = ?
+                  AND substr(created_at, 1, 10) = ?
+                """,
+                (source_hash, date_bucket),
+            ).fetchone()
+        return int(row["count"]) if row is not None else 0
+
+    def count_private_monitoring_interest_on(self, date_bucket: str) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM beta_feedback
+                WHERE private_monitoring_interest = 1
+                  AND substr(created_at, 1, 10) = ?
+                """,
+                (date_bucket,),
+            ).fetchone()
+        return int(row["count"]) if row is not None else 0
+
+    def list_feedback(self, *, limit: int = 50) -> list[FeedbackRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM beta_feedback
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (max(1, min(limit, 500)),),
+            ).fetchall()
+        return [_feedback_from_row(row) for row in rows]
+
+    def record_analytics_event(
+        self,
+        event_name: str,
+        *,
+        source_hash: str | None = None,
+        scan_id: str | None = None,
+        properties: dict[str, Any] | None = None,
+        created_at: datetime | None = None,
+    ) -> None:
+        if scan_id is not None:
+            validate_scan_id(scan_id)
+        timestamp = created_at or datetime.now(UTC)
+        safe_properties = {
+            str(key): value
+            for key, value in (properties or {}).items()
+            if isinstance(value, (str, int, float, bool)) or value is None
+        }
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO beta_analytics_events (
+                  event_id, event_name, created_at, source_hash, scan_id, properties_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    uuid.uuid4().hex,
+                    event_name,
+                    _format_datetime(timestamp),
+                    source_hash,
+                    scan_id,
+                    json.dumps(safe_properties, sort_keys=True),
+                ),
+            )
+
+    def event_counts_on(self, date_bucket: str) -> dict[str, int]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT event_name, COUNT(*) AS count
+                FROM beta_analytics_events
+                WHERE substr(created_at, 1, 10) = ?
+                GROUP BY event_name
+                ORDER BY event_name
+                """,
+                (date_bucket,),
+            ).fetchall()
+        return {str(row["event_name"]): int(row["count"]) for row in rows}
+
+    def worker_last_activity(self) -> datetime | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT MAX(COALESCE(heartbeat_at, updated_at)) AS activity
+                FROM scans
+                WHERE worker_id IS NOT NULL
+                """
+            ).fetchone()
+        return _parse_datetime(row["activity"]) if row is not None else None
+
+    def oldest_retained_report(self) -> datetime | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT MIN(completed_at) AS completed_at
+                FROM scans
+                WHERE status = 'completed'
+                  AND report_reference IS NOT NULL
+                """
+            ).fetchone()
+        return _parse_datetime(row["completed_at"]) if row is not None else None
+
+    def recent_scans(self, *, limit: int = 20) -> list[WebScanState]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM scans
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (max(1, min(limit, 200)),),
+            ).fetchall()
+        return [_state_from_row(row) for row in rows]
+
+    def failed_scans(self, *, limit: int = 20) -> list[WebScanState]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM scans
+                WHERE status = 'failed'
+                ORDER BY completed_at DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (max(1, min(limit, 200)),),
+            ).fetchall()
+        return [_state_from_row(row) for row in rows]
+
     def mark_interrupted_scans(
         self,
         *,
@@ -528,21 +880,28 @@ class SQLiteScanStore:
                 version = int(row["version"])
                 if version == 1:
                     self._migrate_v1_to_v2(connection)
+                    version = 2
+                if version == 2:
+                    self._migrate_v2_to_v3(connection)
+                    version = 3
+                if version == WEB_SCHEMA_VERSION:
                     connection.execute(
                         "UPDATE web_schema_version SET version = ? WHERE id = 1",
                         (WEB_SCHEMA_VERSION,),
                     )
-                elif version != WEB_SCHEMA_VERSION:
+                else:
                     raise StorageError(
                         f"unsupported DriftBeacon web database schema version: {version}"
                     )
             else:
                 self._create_scans_table(connection)
+                self._create_beta_tables(connection)
                 connection.execute(
                     "INSERT INTO web_schema_version (id, version) VALUES (1, ?)",
                     (WEB_SCHEMA_VERSION,),
                 )
             self._create_scans_table(connection)
+            self._create_beta_tables(connection)
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS scans_expires_at_idx ON scans(expires_at)"
             )
@@ -606,6 +965,69 @@ class SQLiteScanStore:
         for column, statement in additions.items():
             if column not in columns:
                 connection.execute(statement)
+
+    def _migrate_v2_to_v3(self, connection: sqlite3.Connection) -> None:
+        self._create_beta_tables(connection)
+
+    def _create_beta_tables(self, connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS beta_usage_counters (
+              source_hash TEXT NOT NULL,
+              date_bucket TEXT NOT NULL,
+              accepted_scan_count INTEGER NOT NULL DEFAULT 0,
+              rejected_scan_count INTEGER NOT NULL DEFAULT 0,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY (source_hash, date_bucket)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS beta_feedback (
+              feedback_id TEXT PRIMARY KEY,
+              scan_id TEXT,
+              created_at TEXT NOT NULL,
+              source_hash TEXT NOT NULL,
+              helpfulness TEXT NOT NULL,
+              changed_priority TEXT NOT NULL,
+              private_monitoring_interest INTEGER NOT NULL DEFAULT 0,
+              comment TEXT NOT NULL,
+              email TEXT,
+              consent_to_contact INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS beta_analytics_events (
+              event_id TEXT PRIMARY KEY,
+              event_name TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              source_hash TEXT,
+              scan_id TEXT,
+              properties_json TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS beta_usage_date_idx
+            ON beta_usage_counters(date_bucket)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS beta_feedback_created_idx
+            ON beta_feedback(created_at)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS beta_events_created_idx
+            ON beta_analytics_events(created_at)
+            """
+        )
 
     def _connect(self, *, initialising: bool = False) -> sqlite3.Connection:
         try:
@@ -742,6 +1164,11 @@ def validate_scan_id(scan_id: str) -> None:
         raise StorageError("invalid scan id")
 
 
+def validate_feedback_id(feedback_id: str) -> None:
+    if not valid_scan_id(feedback_id):
+        raise StorageError("invalid feedback id")
+
+
 def _state_values(state: WebScanState) -> tuple[Any, ...]:
     return (
         state.scan_id,
@@ -810,6 +1237,21 @@ def _state_from_row(row: sqlite3.Row) -> WebScanState:
         claimed_at=_parse_datetime(row["claimed_at"]),
         heartbeat_at=_parse_datetime(row["heartbeat_at"]),
         attempt_count=_optional_int(row["attempt_count"]) or 0,
+    )
+
+
+def _feedback_from_row(row: sqlite3.Row) -> FeedbackRecord:
+    return FeedbackRecord(
+        feedback_id=str(row["feedback_id"]),
+        scan_id=_optional_str(row["scan_id"]),
+        created_at=_parse_datetime(row["created_at"]) or datetime.now(UTC),
+        source_hash=str(row["source_hash"]),
+        helpfulness=str(row["helpfulness"]),
+        changed_priority=str(row["changed_priority"]),
+        private_monitoring_interest=bool(row["private_monitoring_interest"]),
+        comment=str(row["comment"]),
+        email=_optional_str(row["email"]),
+        consent_to_contact=bool(row["consent_to_contact"]),
     )
 
 

@@ -12,6 +12,9 @@ driftbeacon-analysis/
 analysis-summary.csv
 analysis-summary.md
 analysis-summary.json
+feedback.csv
+feedback-*.csv
+*.feedback.csv
 **/.driftbeacon/
 **/.driftbeacon-analysis/
 **/.driftbeacon-demo/

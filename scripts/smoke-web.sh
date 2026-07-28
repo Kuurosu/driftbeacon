@@ -3,6 +3,7 @@ set -eu
 
 BASE_URL="${DRIFTBEACON_SMOKE_BASE_URL:-http://127.0.0.1:8080}"
 TEST_REPOSITORY="${DRIFTBEACON_SMOKE_REPOSITORY:-https://github.com/Kuurosu/driftbeacon}"
+ACCESS_CODE="${DRIFTBEACON_SMOKE_ACCESS_CODE:-}"
 TIMEOUT_SECONDS="${DRIFTBEACON_SMOKE_TIMEOUT_SECONDS:-180}"
 WORK_DIR="${DRIFTBEACON_SCAN_WORK_DIR:-}"
 
@@ -20,10 +21,18 @@ curl -fsS "$BASE_URL/health/ready" >"$tmp_dir/ready.json"
 
 echo "Submitting $TEST_REPOSITORY..."
 headers="$tmp_dir/headers.txt"
-curl -fsS -D "$headers" -o /dev/null \
-  -X POST \
-  --data-urlencode "repository_url=$TEST_REPOSITORY" \
-  "$BASE_URL/scans"
+if [ -n "$ACCESS_CODE" ]; then
+  curl -fsS -D "$headers" -o /dev/null \
+    -X POST \
+    --data-urlencode "repository_url=$TEST_REPOSITORY" \
+    --data-urlencode "beta_access_code=$ACCESS_CODE" \
+    "$BASE_URL/scans"
+else
+  curl -fsS -D "$headers" -o /dev/null \
+    -X POST \
+    --data-urlencode "repository_url=$TEST_REPOSITORY" \
+    "$BASE_URL/scans"
+fi
 
 location="$(awk 'tolower($1) == "location:" {gsub("\r", "", $2); print $2}' "$headers" | tail -1)"
 if [ -z "$location" ]; then

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,7 @@ from .scanners import ScannerExecution
 from .slack import send_slack_report_from_path
 from .storage import LocalStorage, StorageError
 from .web import WebConfig, cleanup_web_storage, run_web_server
+from .web_storage import SQLiteScanStore
 from .worker import WebScanWorker, WorkerConfig
 
 
@@ -62,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version="driftbeacon 0.1.0")
     subparsers = parser.add_subparsers(
         dest="command",
-        metavar="{scan,report,compare,send-slack,run,web,worker,web-cleanup,analyse-repo,analyse}",
+        metavar="{scan,report,compare,send-slack,run,web,worker,web-cleanup,beta-status,beta-recent-scans,beta-failed-scans,beta-pause-instructions,feedback-export,analyse-repo,analyse}",
         required=True,
     )
 
@@ -173,6 +176,44 @@ def build_parser() -> argparse.ArgumentParser:
         help="Claim and process at most one queued scan, then exit.",
     )
 
+    beta_status_parser = subparsers.add_parser(
+        "beta-status",
+        help="Show local controlled-beta operational status.",
+    )
+    beta_status_parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path(".driftbeacon"),
+        help="Base directory for web SQLite, reports and worker state.",
+    )
+
+    beta_recent_parser = subparsers.add_parser(
+        "beta-recent-scans",
+        help="List recent public beta scan records.",
+    )
+    beta_recent_parser.add_argument("--output-dir", type=Path, default=Path(".driftbeacon"))
+    beta_recent_parser.add_argument("--limit", type=int, default=20)
+
+    beta_failed_parser = subparsers.add_parser(
+        "beta-failed-scans",
+        help="List recent failed beta scans with safe error messages.",
+    )
+    beta_failed_parser.add_argument("--output-dir", type=Path, default=Path(".driftbeacon"))
+    beta_failed_parser.add_argument("--limit", type=int, default=20)
+
+    beta_pause_parser = subparsers.add_parser(
+        "beta-pause-instructions",
+        help="Print how to pause and resume public beta submissions.",
+    )
+    beta_pause_parser.add_argument("--output-dir", type=Path, default=Path(".driftbeacon"))
+
+    feedback_export_parser = subparsers.add_parser(
+        "feedback-export",
+        help="Export locally stored beta feedback to CSV.",
+    )
+    feedback_export_parser.add_argument("--output-dir", type=Path, default=Path(".driftbeacon"))
+    feedback_export_parser.add_argument("--output", required=True, type=Path)
+
     analyse_repo_parser = subparsers.add_parser(
         "analyse-repo",
         help="Clone and analyse one public Git repository.",
@@ -214,6 +255,16 @@ def _dispatch(args: argparse.Namespace) -> int:
         return command_worker(args)
     if command == "web-cleanup":
         return command_web_cleanup(args)
+    if command == "beta-status":
+        return command_beta_status(args)
+    if command == "beta-recent-scans":
+        return command_beta_recent_scans(args)
+    if command == "beta-failed-scans":
+        return command_beta_failed_scans(args)
+    if command == "beta-pause-instructions":
+        return command_beta_pause_instructions(args)
+    if command == "feedback-export":
+        return command_feedback_export(args)
     if command == "analyse-repo":
         return command_analyse_repo(args)
     if command == "analyse":
@@ -339,6 +390,117 @@ def command_worker(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_beta_status(args: argparse.Namespace) -> int:
+    config = _web_config_from_args(args)
+    store = SQLiteScanStore(config.database_path)
+    today = datetime.now(UTC).date().isoformat()
+    usage = store.daily_submission_counts(today)
+    events = store.event_counts_on(today)
+    oldest = store.oldest_retained_report()
+    worker_activity = store.worker_last_activity()
+    print("DriftBeacon beta status")
+    print(f"Accepting scans: {'yes' if config.beta.accepting_scans else 'no'}")
+    print(f"Access mode: {config.beta.access_mode}")
+    print(f"Queued scans: {store.count_queued_scans()}")
+    print(f"Running scans: {store.count_running_scans()}")
+    print(f"Completed today: {store.count_completed_scans_on(today)}")
+    print(f"Failed today: {store.count_failed_scans_on(today)}")
+    print(f"Accepted submissions today: {usage['accepted']}")
+    print(f"Rejected today: {usage['rejected']}")
+    print(f"Feedback submissions today: {store.count_feedback_on(today)}")
+    print(
+        "Private monitoring interest today: "
+        f"{store.count_private_monitoring_interest_on(today)}"
+    )
+    print(f"Report views today: {events.get('report_viewed', 0)}")
+    print(f"Sample report views today: {events.get('sample_report_viewed', 0)}")
+    print(f"Disk usage: {_format_cli_bytes(_disk_usage(config.output_dir))}")
+    print(f"Oldest retained report: {_age_text(oldest)}")
+    print(f"Worker last activity: {_age_text(worker_activity)}")
+    return 0
+
+
+def command_beta_recent_scans(args: argparse.Namespace) -> int:
+    config = _web_config_from_args(args)
+    store = SQLiteScanStore(config.database_path)
+    for state in store.recent_scans(limit=int(args.limit)):
+        print(
+            f"{state.created_at.isoformat()} {state.scan_id} {state.status} "
+            f"{state.repository_label}"
+        )
+    return 0
+
+
+def command_beta_failed_scans(args: argparse.Namespace) -> int:
+    config = _web_config_from_args(args)
+    store = SQLiteScanStore(config.database_path)
+    for state in store.failed_scans(limit=int(args.limit)):
+        message = state.safe_error_message or state.message
+        timestamp = (
+            state.completed_at.isoformat()
+            if state.completed_at
+            else state.updated_at.isoformat()
+        )
+        print(
+            f"{timestamp} {state.scan_id} {state.repository_label} {message}"
+        )
+    return 0
+
+
+def command_beta_pause_instructions(args: argparse.Namespace) -> int:
+    _ = _web_config_from_args(args)
+    print("Pause new public beta scans:")
+    print("  set DRIFTBEACON_BETA_ACCEPTING_SCANS=false")
+    print("  restart the web process")
+    print("Resume public beta scans:")
+    print("  set DRIFTBEACON_BETA_ACCEPTING_SCANS=true")
+    print("  restart the web process")
+    print("Existing completed report URLs remain accessible while submissions are paused.")
+    return 0
+
+
+def command_feedback_export(args: argparse.Namespace) -> int:
+    config = _web_config_from_args(args)
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output.exists() and output.is_symlink():
+        raise ValueError(f"refusing to write through symlink: {output}")
+    store = SQLiteScanStore(config.database_path)
+    rows = store.list_feedback(limit=500)
+    with output.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "feedback_id",
+                "created_at",
+                "scan_id",
+                "helpfulness",
+                "changed_priority",
+                "private_monitoring_interest",
+                "comment",
+                "email",
+                "consent_to_contact",
+            ],
+        )
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(
+                {
+                    "feedback_id": row.feedback_id,
+                    "created_at": row.created_at.isoformat(),
+                    "scan_id": row.scan_id or "",
+                    "helpfulness": row.helpfulness,
+                    "changed_priority": row.changed_priority,
+                    "private_monitoring_interest": row.private_monitoring_interest,
+                    "comment": row.comment,
+                    "email": row.email or "",
+                    "consent_to_contact": row.consent_to_contact,
+                }
+            )
+    print(f"Exported {len(rows)} feedback submissions to {output}")
+    return 0
+
+
 def _web_config_from_args(args: argparse.Namespace) -> WebConfig:
     base = WebConfig.from_environment()
     output_dir = Path(args.output_dir)
@@ -362,10 +524,10 @@ def _web_config_from_args(args: argparse.Namespace) -> WebConfig:
         scanner_timeout_seconds=int(getattr(args, "scanner_timeout", base.scanner_timeout_seconds)),
         clone_timeout_seconds=int(getattr(args, "clone_timeout", base.clone_timeout_seconds)),
         retention_days=base.retention_days,
-        scans_per_hour=base.scans_per_hour,
         max_repository_files=base.max_repository_files,
         max_repository_bytes=base.max_repository_bytes,
         top_findings=base.top_findings,
+        beta=base.beta,
     ).validate()
 
 
@@ -549,3 +711,43 @@ def _append_github_summary(path: Path, summary: str) -> None:
 def _github_summary_path() -> Path | None:
     value = os.environ.get("GITHUB_STEP_SUMMARY")
     return Path(value) if value else None
+
+
+def _disk_usage(path: Path) -> int:
+    root = path.expanduser()
+    if not root.exists():
+        return 0
+    total = 0
+    for item in root.rglob("*"):
+        try:
+            if item.is_file() and not item.is_symlink():
+                total += item.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _format_cli_bytes(value: int) -> str:
+    if value >= 1024 * 1024 * 1024:
+        return f"{value / (1024 * 1024 * 1024):.1f} GB"
+    if value >= 1024 * 1024:
+        return f"{value / (1024 * 1024):.1f} MB"
+    if value >= 1024:
+        return f"{value / 1024:.1f} KB"
+    return f"{value} bytes"
+
+
+def _age_text(value: datetime | None) -> str:
+    if value is None:
+        return "none"
+    seconds = max(0, int((datetime.now(UTC) - value.astimezone(UTC)).total_seconds()))
+    if seconds < 60:
+        return f"{seconds} seconds ago"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes} minutes ago"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 48:
+        return f"{hours} hours ago"
+    days, hours = divmod(hours, 24)
+    return f"{days} days ago"
