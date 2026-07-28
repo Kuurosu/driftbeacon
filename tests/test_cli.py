@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-from driftbeacon.cli import build_parser, main
+from driftbeacon.cli import _web_config_from_args, build_parser, main
 from driftbeacon.web_storage import FeedbackRecord, SQLiteScanStore
 
 
@@ -44,6 +44,7 @@ def test_web_parser_accepts_local_server_options() -> None:
             ".driftbeacon-web-test",
             "--max-concurrent-scans",
             "1",
+            "--local-dev",
         ]
     )
 
@@ -52,6 +53,17 @@ def test_web_parser_accepts_local_server_options() -> None:
     assert args.port == 9090
     assert args.output_dir == Path(".driftbeacon-web-test")
     assert args.max_concurrent_scans == 1
+    assert args.local_dev is True
+
+
+def test_web_local_dev_disables_beta_limits() -> None:
+    args = build_parser().parse_args(
+        ["web", "--output-dir", ".driftbeacon-web-test", "--local-dev"]
+    )
+
+    config = _web_config_from_args(args)
+
+    assert config.beta.enabled is False
 
 
 def test_web_cleanup_parser_accepts_output_dir() -> None:

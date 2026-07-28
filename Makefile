@@ -1,4 +1,4 @@
-.PHONY: install test lint typecheck format run-sample clean
+.PHONY: install test lint typecheck format run-sample web worker clean
 
 PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3.12)
 PYTHONPATH ?= src
@@ -26,6 +26,12 @@ run-sample:
 		--checkov-json examples/sample-checkov.json \
 		--trivy-json examples/sample-trivy.json \
 		--no-slack
+
+web:
+	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m driftbeacon web --port 8080 --local-dev
+
+worker:
+	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m driftbeacon worker
 
 clean:
 	rm -rf .driftbeacon .driftbeacon-sample .pytest_cache .mypy_cache .ruff_cache *.egg-info build dist

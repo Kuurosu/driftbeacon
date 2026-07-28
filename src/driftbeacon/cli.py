@@ -8,6 +8,7 @@ import json
 import os
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -52,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Examples:\n"
             "  driftbeacon run --repository-path . --output-dir .driftbeacon --no-slack\n"
-            "  driftbeacon web --port 8080\n"
+            "  driftbeacon web --port 8080 --local-dev\n"
             "  driftbeacon worker\n"
             "  driftbeacon analyse-repo https://github.com/org/infrastructure.git\n"
             "  driftbeacon analyse repos.txt --workers 4\n"
@@ -136,6 +137,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=120,
         help="Git clone timeout in seconds.",
+    )
+    web_parser.add_argument(
+        "--local-dev",
+        action="store_true",
+        help="Disable controlled-beta access and daily submission limits for local UI testing.",
     )
 
     cleanup_parser = subparsers.add_parser(
@@ -506,6 +512,9 @@ def command_feedback_export(args: argparse.Namespace) -> int:
 def _web_config_from_args(args: argparse.Namespace) -> WebConfig:
     base = WebConfig.from_environment()
     output_dir = Path(args.output_dir)
+    beta = base.beta
+    if bool(getattr(args, "local_dev", False)):
+        beta = replace(base.beta, enabled=False)
     return WebConfig(
         output_dir=output_dir,
         database_path=Path(
@@ -529,7 +538,7 @@ def _web_config_from_args(args: argparse.Namespace) -> WebConfig:
         max_repository_files=base.max_repository_files,
         max_repository_bytes=base.max_repository_bytes,
         top_findings=base.top_findings,
-        beta=base.beta,
+        beta=beta,
     ).validate()
 
 

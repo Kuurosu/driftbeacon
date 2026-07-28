@@ -83,10 +83,14 @@ open .driftbeacon-sample/report.md
 Run the local public web scan MVP:
 
 ```sh
-driftbeacon web --port 8080
+driftbeacon web --port 8080 --local-dev
 driftbeacon worker
 open http://127.0.0.1:8080
 ```
+
+For day-to-day local UI testing, `--local-dev` disables controlled-beta access and
+daily submission limits. Hosted or shared beta deployments should omit that flag
+and use the environment variables below.
 
 Run against the current repository:
 
@@ -153,7 +157,8 @@ Public web scan MVP:
 driftbeacon web \
   --host 127.0.0.1 \
   --port 8080 \
-  --output-dir .driftbeacon
+  --output-dir .driftbeacon \
+  --local-dev
 ```
 
 The web MVP accepts only HTTPS public GitHub repository URLs, stores queued scan jobs, exposes structured status polling and persists shareable completed reports until retention expiry. The worker clones with a shallow Git checkout into isolated temporary directories, uses the same DriftBeacon scan engine as the CLI and deletes temporary clones after success or failure.
@@ -165,6 +170,7 @@ The public web experience is designed for a controlled beta:
 - Invite mode can require a beta access code before a scan starts.
 - `DRIFTBEACON_BETA_ACCEPTING_SCANS=false` pauses new submissions while keeping existing reports and health endpoints available.
 - Daily source and global scan limits are stored in SQLite using a keyed hash of the client source rather than raw IP addresses.
+- `driftbeacon web --local-dev` disables these beta gates for local-only UI testing.
 - Completed reports include Top priorities, all deduplicated active actionable findings, scanner coverage, a report glossary, a short feedback form and a private-monitoring interest prompt.
 
 The web process only validates requests, creates queued scan jobs, reads status and serves completed reports. Run a separate worker process to claim queued scans and execute Git clone, Checkov and Trivy:
