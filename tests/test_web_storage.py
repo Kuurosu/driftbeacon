@@ -282,6 +282,52 @@ def test_sqlite_v2_schema_migrates_to_beta_tables(tmp_path: Path) -> None:
     assert decision.allowed is True
 
 
+def test_sqlite_v3_schema_migrates_feedback_difficulty_column(tmp_path: Path) -> None:
+    database = tmp_path / "v3.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE web_schema_version (id INTEGER PRIMARY KEY, version INTEGER NOT NULL)"
+        )
+        connection.execute("INSERT INTO web_schema_version (id, version) VALUES (1, 3)")
+        connection.execute(
+            """
+            CREATE TABLE beta_feedback (
+              feedback_id TEXT PRIMARY KEY,
+              scan_id TEXT,
+              created_at TEXT NOT NULL,
+              source_hash TEXT NOT NULL,
+              helpfulness TEXT NOT NULL,
+              changed_priority TEXT NOT NULL,
+              private_monitoring_interest INTEGER NOT NULL DEFAULT 0,
+              comment TEXT NOT NULL,
+              email TEXT,
+              consent_to_contact INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+
+    store = SQLiteScanStore(database)
+    store.save_feedback(
+        FeedbackRecord(
+            feedback_id="abcdef123456",
+            created_at=datetime.now(UTC),
+            scan_id=None,
+            source_hash="hash-only",
+            helpfulness="partly",
+            changed_priority="maybe",
+            difficult_to_understand="production_health",
+            private_monitoring_interest=False,
+            comment="scores need more context",
+            email=None,
+            consent_to_contact=False,
+        )
+    )
+
+    rows = store.list_feedback()
+    assert store.check_ready() is True
+    assert rows[0].difficult_to_understand == "production_health"
+
+
 def test_sqlite_insert_uses_parameters_for_repository_url(tmp_path: Path) -> None:
     store = SQLiteScanStore(tmp_path / "web.sqlite3")
     state = _state("abcdef123456", tmp_path)
@@ -336,6 +382,7 @@ def test_sqlite_feedback_and_analytics_are_local_only_records(tmp_path: Path) ->
         source_hash="hash-only",
         helpfulness="yes",
         changed_priority="maybe",
+        difficult_to_understand="scanner_coverage",
         private_monitoring_interest=True,
         comment="<b>helpful</b>",
         email="tester@example.com",
@@ -354,6 +401,7 @@ def test_sqlite_feedback_and_analytics_are_local_only_records(tmp_path: Path) ->
     assert len(rows) == 1
     assert rows[0].comment == "<b>helpful</b>"
     assert rows[0].email == "tester@example.com"
+    assert rows[0].difficult_to_understand == "scanner_coverage"
     assert store.count_private_monitoring_interest_on(now.date().isoformat()) == 1
     assert store.event_counts_on(now.date().isoformat()) == {"feedback_submitted": 1}
 

@@ -17,7 +17,7 @@ from .models import ComparisonSummary, Finding, ScanResult
 from .storage import StorageError
 
 WEB_REPORT_FORMAT_VERSION = "web-report-v1"
-WEB_SCHEMA_VERSION = 3
+WEB_SCHEMA_VERSION = 4
 
 ScanStatus = Literal[
     "queued",
@@ -139,6 +139,7 @@ class FeedbackRecord:
     comment: str
     email: str | None
     consent_to_contact: bool
+    difficult_to_understand: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -629,9 +630,9 @@ class SQLiteScanStore:
                 """
                 INSERT INTO beta_feedback (
                   feedback_id, scan_id, created_at, source_hash, helpfulness,
-                  changed_priority, private_monitoring_interest, comment, email,
-                  consent_to_contact
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  changed_priority, private_monitoring_interest, comment,
+                  difficult_to_understand, email, consent_to_contact
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     feedback.feedback_id,
@@ -642,6 +643,7 @@ class SQLiteScanStore:
                     feedback.changed_priority,
                     1 if feedback.private_monitoring_interest else 0,
                     feedback.comment,
+                    feedback.difficult_to_understand,
                     feedback.email,
                     1 if feedback.consent_to_contact else 0,
                 ),
@@ -884,6 +886,9 @@ class SQLiteScanStore:
                 if version == 2:
                     self._migrate_v2_to_v3(connection)
                     version = 3
+                if version == 3:
+                    self._migrate_v3_to_v4(connection)
+                    version = 4
                 if version == WEB_SCHEMA_VERSION:
                     connection.execute(
                         "UPDATE web_schema_version SET version = ? WHERE id = 1",
@@ -969,6 +974,17 @@ class SQLiteScanStore:
     def _migrate_v2_to_v3(self, connection: sqlite3.Connection) -> None:
         self._create_beta_tables(connection)
 
+    def _migrate_v3_to_v4(self, connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(beta_feedback)").fetchall()
+        }
+        if "difficult_to_understand" not in columns:
+            connection.execute(
+                "ALTER TABLE beta_feedback ADD COLUMN difficult_to_understand "
+                "TEXT NOT NULL DEFAULT ''"
+            )
+
     def _create_beta_tables(self, connection: sqlite3.Connection) -> None:
         connection.execute(
             """
@@ -993,6 +1009,7 @@ class SQLiteScanStore:
               changed_priority TEXT NOT NULL,
               private_monitoring_interest INTEGER NOT NULL DEFAULT 0,
               comment TEXT NOT NULL,
+              difficult_to_understand TEXT NOT NULL DEFAULT '',
               email TEXT,
               consent_to_contact INTEGER NOT NULL DEFAULT 0
             )
@@ -1252,6 +1269,7 @@ def _feedback_from_row(row: sqlite3.Row) -> FeedbackRecord:
         comment=str(row["comment"]),
         email=_optional_str(row["email"]),
         consent_to_contact=bool(row["consent_to_contact"]),
+        difficult_to_understand=str(row["difficult_to_understand"]),
     )
 
 

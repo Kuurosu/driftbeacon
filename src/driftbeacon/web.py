@@ -16,7 +16,7 @@ import shutil
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -27,13 +27,25 @@ from wsgiref.simple_server import make_server
 from wsgiref.types import StartResponse, WSGIEnvironment
 
 from .analysis import clone_repository, detect_supported_infrastructure_files
+from .analysis_metrics import (
+    classify_path_group,
+    directory_group_breakdown,
+    finding_source_breakdown,
+    production_findings,
+)
 from .comparison import compare_scans
 from .config import load_config
 from .models import ComparisonSummary, Finding, ScanResult
-from .prioritise import prioritise_findings
+from .prioritise import PrioritisedFinding, prioritise_findings
 from .redaction import redact_secrets
 from .reporting import generate_report, prioritised_finding_details
 from .scanners.base import safe_walk
+from .scoring import (
+    ACTIONABLE_SEVERITIES,
+    calculate_health_score,
+    deduplicate_findings_by_fingerprint,
+    severity_counts,
+)
 from .storage import StorageError
 from .web_storage import (
     WEB_REPORT_FORMAT_VERSION,
@@ -246,6 +258,46 @@ class WebScanArtifacts:
     production_grade: str | None = None
     coverage_status: str | None = None
     baseline_type: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReportFindingOptions:
+    """Query options for the web findings explorer."""
+
+    severity: str = ""
+    production: str = ""
+    scanner: str = ""
+    category: str = ""
+    path_type: str = ""
+    status: str = ""
+    sort: str = "recommended"
+    page: int = 1
+
+
+@dataclass(frozen=True, slots=True)
+class ReportFindingView:
+    """Rendered finding row with priority context and a safe anchor."""
+
+    finding: Finding
+    priority: PrioritisedFinding
+    rank: int
+    anchor: str
+    duplicate_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ReportFindingPage:
+    """Filtered and paginated finding explorer state."""
+
+    all_findings: list[ReportFindingView]
+    filtered_findings: list[ReportFindingView]
+    page_findings: list[ReportFindingView]
+    options: ReportFindingOptions
+    total_count: int
+    filtered_count: int
+    page_count: int
+    total_pages: int
+    has_more_than_top_three: bool
 
 
 class NoOpAnalytics:
@@ -500,6 +552,7 @@ class WebScanService:
         scan_id: str | None,
         helpfulness: str,
         changed_priority: str,
+        difficult_to_understand: str,
         private_monitoring_interest: bool,
         comment: str,
         email: str,
@@ -528,6 +581,7 @@ class WebScanService:
                 source_hash=source_hash,
                 helpfulness=helpfulness,
                 changed_priority=changed_priority,
+                difficult_to_understand=difficult_to_understand,
                 private_monitoring_interest=private_monitoring_interest,
                 comment=comment,
                 email=stored_email or None,
@@ -662,7 +716,8 @@ class DriftBeaconWebApp:
                 return self._html(
                     start_response,
                     render_sample_report_page(
-                        feedback_submitted=_query_flag(environ, "feedback", "thanks")
+                        feedback_submitted=_query_flag(environ, "feedback", "thanks"),
+                        options=report_finding_options_from_environ(environ),
                     ),
                 )
             if method == "GET" and path == "/privacy":
@@ -779,6 +834,20 @@ class DriftBeaconWebApp:
                 {"yes", "maybe", "no"},
                 "changed priority",
             )
+            difficult_to_understand = _validated_choice(
+                (form.get("difficult_to_understand") or [""])[0],
+                {
+                    "",
+                    "production_health",
+                    "overall_health",
+                    "score_difference",
+                    "top_priorities",
+                    "finding_explanations",
+                    "scanner_coverage",
+                    "other",
+                },
+                "report difficulty",
+            )
             comment = _validated_text((form.get("comment") or [""])[0], "feedback", 2000)
             email = _validated_text((form.get("email") or [""])[0], "email", 320)
             consent_to_contact = (form.get("consent_to_contact") or [""])[0] == "yes"
@@ -790,6 +859,7 @@ class DriftBeaconWebApp:
                 scan_id=scan_id,
                 helpfulness=helpfulness,
                 changed_priority=changed_priority,
+                difficult_to_understand=difficult_to_understand,
                 private_monitoring_interest=private_monitoring_interest,
                 comment=comment,
                 email=email,
@@ -879,6 +949,7 @@ class DriftBeaconWebApp:
                     stored.comparison,
                     state=state,
                     feedback_submitted=_query_flag(environ, "feedback", "thanks"),
+                    options=report_finding_options_from_environ(environ),
                 ),
             )
         return self._html(
@@ -1359,23 +1430,18 @@ def render_repository_report_page(
     state: WebScanState | None = None,
     feedback_submitted: bool = False,
     sample: bool = False,
+    options: ReportFindingOptions | None = None,
 ) -> str:
     """Render a web report that emphasizes Production Health and next actions."""
 
     summary = scan.summary
-    top_items = prioritise_findings(_web_priority_candidates(scan.findings), limit=3)
+    report_path = "/sample-report" if sample else f"/scans/{state.scan_id}" if state else ""
+    finding_page = build_report_finding_page(scan, options or ReportFindingOptions())
     finding_notice = _finding_state_notice(scan)
     priority_cards = "\n".join(
-        _priority_card(index, item, comparison.has_baseline)
-        for index, item in enumerate(top_items, start=1)
+        _priority_card(index, view, comparison.has_baseline, report_path=report_path)
+        for index, view in enumerate(finding_page.all_findings[:3], start=1)
     ) or f'<p class="empty">{_escape(_empty_findings_text(scan))}</p>'
-    scanner_status = "\n".join(
-        f"<li><strong>{_escape(status.name.capitalize())}:</strong> "
-        f"{_escape(status.status.capitalize())} - {_escape(status.message)}</li>"
-        for status in scan.scanner_statuses.values()
-    ) or "<li>No scanner status was recorded.</li>"
-    source_rows = _breakdown_rows(summary.get("finding_source_breakdown"))
-    group_rows = _breakdown_rows(summary.get("directory_group_breakdown"))
     production_health = _score_text(summary.get("production_health_score"))
     production_grade = _grade_text(summary.get("production_grade"))
     overall_health = _score_text(scan.health_score)
@@ -1394,6 +1460,9 @@ def render_repository_report_page(
         else ""
     )
     scan_id = state.scan_id if state is not None else None
+    top_summary = _top_priority_summary(finding_page)
+    divergence = _score_divergence_callout(scan)
+    glossary = _report_glossary()
     return _page(
         f"DriftBeacon report for {scan.repository}",
         f"""
@@ -1413,73 +1482,53 @@ def render_repository_report_page(
             </dl>
           </section>
 
-          <section class="health-focus">
-            <div>
+          <section class="report-section health-focus" aria-labelledby="production-health-heading">
+            <div class="score-card score-card-primary">
               <p class="eyebrow">Primary metric</p>
-              <h2>Production Health</h2>
+              <h2 id="production-health-heading">Production Health <a class="definition-link" href="#definition-production-health" aria-label="What Production Health means">?</a></h2>
               <p class="score">{_escape(production_health)}</p>
               <p class="grade">Grade {_escape(production_grade)}{_escape(provisional)}</p>
+              <p>Production Health focuses on findings that DriftBeacon classifies as production-relevant or likely production-related from repository paths.</p>
+              <p>A high Production Health score means those production-relevant areas have relatively few or lower-impact included findings. It does not mean the entire repository is healthy or secure.</p>
               <p>{_escape(str(summary.get("production_score_reason", "No production score reason recorded.")))}</p>
+              {_score_breakdown("Production-relevant included findings", _production_severity_counts(scan))}
+              {_score_calculation_disclosure("production")}
               {finding_notice}
             </div>
-            <aside>
-              <h2>Overall Health</h2>
+            <aside class="score-card">
+              <h2>Overall Health <a class="definition-link" href="#definition-overall-health" aria-label="What Overall Health means">?</a></h2>
               <p class="support-score">{_escape(overall_health)} / Grade {_escape(overall_grade)}</p>
-              <p>Overall Health includes all analysed actionable findings. Production Health is
-              shown first because this report is designed to prioritise production risk.</p>
+              <p>Overall Health reflects included findings across the scanned repository, including development, example, test, generated and non-production areas where detected.</p>
+              <p>A low Overall Health score can be caused by many findings outside the areas DriftBeacon considers production-relevant.</p>
+              {_score_breakdown("All included findings", _severity_counts_for_report(scan.findings))}
+              {_score_calculation_disclosure("overall")}
             </aside>
           </section>
 
-          <section class="methodology-note">
-            <h2>Methodology and limitations</h2>
-            <p>Production Health is a prioritisation and trend metric based on findings detected by
-            completed scanners. It does not prove that a repository or production environment is
-            secure. Path classification is heuristic and should be reviewed. Static analysis can
-            produce false positives and false negatives.</p>
-          </section>
+          {divergence}
 
-          <section>
-            <h2>What to fix next</h2>
-            <p class="unavailable">This web report shows production-relevant findings first when
-            they exist, then applies DriftBeacon's shared prioritisation and explanation logic.</p>
+          <section class="report-section" aria-labelledby="top-priorities-heading">
+            <h2 id="top-priorities-heading">Top priorities <a class="definition-link" href="#definition-top-priorities" aria-label="What top priorities means">?</a></h2>
+            <p>These are the three issues DriftBeacon recommends investigating first based on production relevance, severity and the deterministic priority rules.</p>
+            <p class="count-note">{top_summary}</p>
             <div class="priority-list">{priority_cards}</div>
           </section>
 
-          <section class="impact">
-            <h2>Expected impact</h2>
+          {_all_findings_section(finding_page, report_path)}
+
+          <section class="report-section impact">
+            <h2>What to do with this report</h2>
             <p>Current production-relevant actionable findings: <strong>{summary.get("production_actionable_findings", 0)}</strong>.</p>
+            <p>Start with the top priorities, inspect the full finding detail, confirm whether each affected path is actually used for production, and then apply the recommended remediation in your normal engineering workflow.</p>
             <p>Projected risk reduction, estimated effort and projected Production Health are
             unavailable in this MVP because remediation-impact simulation has not been implemented.
             DriftBeacon will only show those values after they are calculated from the real scoring
             model.</p>
           </section>
 
-          <section class="evidence">
-            <h2>Supporting evidence</h2>
-            <div class="evidence-grid">
-              <article>
-                <h3>Severity distribution</h3>
-                <ul>
-                  <li>Critical: {summary.get("production_critical_findings", 0)} production / {_severity_count(scan, "critical")} total</li>
-                  <li>High: {summary.get("production_high_findings", 0)} production / {_severity_count(scan, "high")} total</li>
-                  <li>Medium: {summary.get("production_medium_findings", 0)} production / {_severity_count(scan, "medium")} total</li>
-                  <li>Low: {summary.get("production_low_findings", 0)} production / {_severity_count(scan, "low")} total</li>
-                </ul>
-              </article>
-              <article>
-                <h3>Finding sources</h3>
-                {_table(source_rows, "Source")}
-              </article>
-              <article>
-                <h3>Directory groups</h3>
-                {_table(group_rows, "Directory group")}
-              </article>
-              <article>
-                <h3>Scanner status</h3>
-                <ul>{scanner_status}</ul>
-              </article>
-            </div>
-          </section>
+          {_scanner_coverage_section(scan)}
+
+          {glossary}
 
           <section class="methodology-note">
             <h2>Private monitoring interest</h2>
@@ -1504,7 +1553,11 @@ def render_repository_report_page(
     )
 
 
-def render_sample_report_page(*, feedback_submitted: bool = False) -> str:
+def render_sample_report_page(
+    *,
+    feedback_submitted: bool = False,
+    options: ReportFindingOptions | None = None,
+) -> str:
     """Render a static example report without creating a scan record."""
 
     scan, comparison = sample_report_data()
@@ -1513,19 +1566,110 @@ def render_sample_report_page(*, feedback_submitted: bool = False) -> str:
         comparison,
         feedback_submitted=feedback_submitted,
         sample=True,
+        options=options,
     )
 
 
 def sample_report_data() -> tuple[ScanResult, ComparisonSummary]:
     """Generated fixture data for the public beta sample report."""
 
+    completed_at = "2026-07-24T09:01:12+00:00"
+    findings: list[dict[str, object]] = [
+        {
+            "id": "sample-public-s3",
+            "scanner": "checkov",
+            "rule_id": "CKV_AWS_20",
+            "title": "S3 bucket allows public read access",
+            "description": "Generated fixture showing public object access in production infrastructure.",
+            "severity": "high",
+            "category": "storage",
+            "file_path": "terraform/production/s3.tf",
+            "line_start": 7,
+            "resource": "aws_s3_bucket.demo",
+            "status": "new",
+            "first_seen": "2026-07-24T09:00:00+00:00",
+            "last_seen": completed_at,
+            "fingerprint": "sample-public-s3",
+            "remediation": "Disable public ACLs and enable S3 Block Public Access.",
+            "finding_family": "checkov_configuration",
+            "directory_group": "production",
+        },
+        {
+            "id": "sample-privileged-pod",
+            "scanner": "checkov",
+            "rule_id": "CKV_K8S_16",
+            "title": "Container runs as privileged",
+            "description": "Generated fixture showing a privileged Kubernetes workload in a production path.",
+            "severity": "critical",
+            "category": "container",
+            "file_path": "k8s/production/deployment.yaml",
+            "line_start": 22,
+            "resource": "Deployment/demo",
+            "status": "new",
+            "first_seen": "2026-07-24T09:00:00+00:00",
+            "last_seen": completed_at,
+            "fingerprint": "sample-privileged-pod",
+            "remediation": "Disable privileged mode and run with the least required capabilities.",
+            "finding_family": "checkov_configuration",
+            "directory_group": "production",
+        },
+    ]
+    for index in range(1, 56):
+        findings.append(
+            {
+                "id": f"sample-example-open-sg-{index}",
+                "scanner": "checkov",
+                "rule_id": "CKV_AWS_260",
+                "title": "Example security group allows public ingress",
+                "description": "Generated fixture showing a non-production security group open to the internet.",
+                "severity": "high",
+                "category": "network",
+                "file_path": f"examples/demo-infrastructure/team-{index}/security-group.tf",
+                "line_start": 14,
+                "resource": f"aws_security_group.example_{index}",
+                "status": "new",
+                "first_seen": "2026-07-24T09:00:00+00:00",
+                "last_seen": completed_at,
+                "fingerprint": f"sample-example-open-sg-{index}",
+                "remediation": "Restrict ingress to the smallest required CIDR range before using this pattern.",
+                "finding_family": "checkov_configuration",
+                "directory_group": "examples",
+            }
+        )
+    for index in range(1, 8):
+        findings.append(
+            {
+                "id": f"sample-example-vuln-{index}",
+                "scanner": "trivy",
+                "rule_id": f"CVE-2099-{index:04d}",
+                "title": "Generated example dependency vulnerability",
+                "description": "Generated fixture showing dependency risk outside production paths.",
+                "severity": "medium",
+                "category": "vulnerability",
+                "file_path": f"examples/services/service-{index}/package-lock.json",
+                "line_start": 1,
+                "resource": f"demo-package-{index}",
+                "status": "new",
+                "first_seen": "2026-07-24T09:00:00+00:00",
+                "last_seen": completed_at,
+                "fingerprint": f"sample-example-vuln-{index}",
+                "remediation": "Update the dependency before this example pattern is copied into production code.",
+                "finding_family": "trivy_vulnerability",
+                "directory_group": "examples",
+            }
+        )
+    supported_files = {
+        str(finding.get("file_path"))
+        for finding in findings
+        if isinstance(finding.get("file_path"), str)
+    }
     scan = ScanResult.from_dict(
         {
             "repository": "example/public-infra-demo",
             "branch": "main",
             "commit_sha": "example000000",
             "started_at": "2026-07-24T09:00:00+00:00",
-            "completed_at": "2026-07-24T09:01:12+00:00",
+            "completed_at": completed_at,
             "scanner_statuses": {
                 "checkov": {
                     "name": "checkov",
@@ -1540,117 +1684,36 @@ def sample_report_data() -> tuple[ScanResult, ComparisonSummary]:
                     "duration_seconds": 21.9,
                 },
             },
-            "findings": [
-                {
-                    "id": "sample-public-s3",
-                    "scanner": "checkov",
-                    "rule_id": "CKV_AWS_20",
-                    "title": "S3 bucket allows public read access",
-                    "description": "Generated fixture showing public object access.",
-                    "severity": "high",
-                    "category": "storage",
-                    "file_path": "terraform/production/s3.tf",
-                    "line_start": 7,
-                    "resource": "aws_s3_bucket.demo",
-                    "status": "new",
-                    "first_seen": "2026-07-24T09:00:00+00:00",
-                    "last_seen": "2026-07-24T09:01:12+00:00",
-                    "fingerprint": "sample-public-s3",
-                    "remediation": "Disable public ACLs and enable S3 Block Public Access.",
-                    "finding_family": "storage",
-                    "directory_group": "production",
-                },
-                {
-                    "id": "sample-privileged-pod",
-                    "scanner": "checkov",
-                    "rule_id": "CKV_K8S_16",
-                    "title": "Container runs as privileged",
-                    "description": "Generated fixture showing a privileged Kubernetes workload.",
-                    "severity": "critical",
-                    "category": "container",
-                    "file_path": "k8s/production/deployment.yaml",
-                    "line_start": 22,
-                    "resource": "Deployment/demo",
-                    "status": "new",
-                    "first_seen": "2026-07-24T09:00:00+00:00",
-                    "last_seen": "2026-07-24T09:01:12+00:00",
-                    "fingerprint": "sample-privileged-pod",
-                    "remediation": "Disable privileged mode and run with the least required capabilities.",
-                    "finding_family": "container",
-                    "directory_group": "production",
-                },
-                {
-                    "id": "sample-dev-vuln",
-                    "scanner": "trivy",
-                    "rule_id": "CVE-2099-0001",
-                    "title": "Generated dependency vulnerability",
-                    "description": "Generated fixture showing dependency risk outside production paths.",
-                    "severity": "medium",
-                    "category": "dependency",
-                    "file_path": "examples/package-lock.json",
-                    "line_start": 1,
-                    "resource": "demo-package",
-                    "status": "new",
-                    "first_seen": "2026-07-24T09:00:00+00:00",
-                    "last_seen": "2026-07-24T09:01:12+00:00",
-                    "fingerprint": "sample-dev-vuln",
-                    "remediation": "Update the dependency when the example fixture is promoted to production use.",
-                    "finding_family": "dependency",
-                    "directory_group": "examples",
-                    "excluded_from_score": True,
-                    "score_exclusion_reason": "Example path",
-                },
-            ],
-            "health_score": 72,
-            "summary": {
-                "coverage_state": "complete_coverage",
-                "production_coverage_state": "complete_coverage",
-                "production_health_score": 58,
-                "production_grade": "F",
-                "production_grade_provisional": False,
-                "production_score_reason": (
-                    "Production Health reflects critical and high findings in production paths."
-                ),
-                "production_actionable_findings": 2,
-                "production_critical_findings": 1,
-                "production_high_findings": 1,
-                "production_medium_findings": 0,
-                "production_low_findings": 0,
-                "finding_source_breakdown": {
-                    "checkov": {
-                        "critical": 1,
-                        "high": 1,
-                        "medium": 0,
-                        "low": 0,
-                        "total_actionable": 2,
-                    },
-                    "trivy": {
-                        "critical": 0,
-                        "high": 0,
-                        "medium": 1,
-                        "low": 0,
-                        "total_actionable": 1,
-                    },
-                },
-                "directory_group_breakdown": {
-                    "production": {
-                        "critical": 1,
-                        "high": 1,
-                        "medium": 0,
-                        "low": 0,
-                        "total_actionable": 2,
-                    },
-                    "examples": {
-                        "critical": 0,
-                        "high": 0,
-                        "medium": 1,
-                        "low": 0,
-                        "total_actionable": 1,
-                    },
-                },
-            },
+            "findings": findings,
+            "health_score": None,
+            "summary": {},
         }
     )
+    production_only = production_findings(scan.findings)
+    production_counts = severity_counts(production_only)
+    production_actionable = _production_score_findings(scan)
+    production_score = calculate_health_score(production_only)
+    scan.health_score = calculate_health_score(scan.findings)
+    scan.summary = {
+        "coverage_state": "complete_coverage",
+        "production_coverage_state": "complete_coverage",
+        "score_reason": "Overall Health calculated from generated scanner fixture findings.",
+        "production_health_score": production_score,
+        "production_grade": _grade_for_score(production_score),
+        "production_grade_provisional": False,
+        "production_score_reason": (
+            "Production Health is calculated from the two generated findings in production paths."
+        ),
+        "production_actionable_findings": len(production_actionable),
+        "production_critical_findings": production_counts["critical"],
+        "production_high_findings": production_counts["high"],
+        "production_medium_findings": production_counts["medium"],
+        "production_low_findings": production_counts["low"],
+        "supported_files_scanned": len(supported_files),
+        "affected_supported_files": len(supported_files),
+        "finding_source_breakdown": finding_source_breakdown(scan.findings),
+        "directory_group_breakdown": directory_group_breakdown(scan.findings),
+    }
     comparison = compare_scans(scan, None)
     return scan, comparison
 
@@ -1740,11 +1803,83 @@ def render_not_found_page() -> str:
     return _page("Not found", '<main class="narrow"><h1>Not found</h1></main>')
 
 
-def _priority_card(index: int, item: Any, has_baseline: bool) -> str:
-    details = prioritised_finding_details(item, has_baseline=has_baseline)
+def report_finding_options_from_environ(environ: WSGIEnvironment) -> ReportFindingOptions:
+    values = parse_qs(str(environ.get("QUERY_STRING") or ""), keep_blank_values=True)
+    return ReportFindingOptions(
+        severity=_query_choice(values, "severity", {"", *ACTIONABLE_SEVERITIES}),
+        production=_query_choice(values, "production", {"", "production", "other"}),
+        scanner=_query_text(values, "scanner"),
+        category=_query_text(values, "category"),
+        path_type=_query_text(values, "path_type"),
+        status=_query_choice(values, "status", {"", "new", "recurring", "resolved"}),
+        sort=_query_choice(values, "sort", {"recommended", "severity", "production", "path"}),
+        page=max(1, _query_int(values, "page", 1)),
+    )
+
+
+def build_report_finding_page(
+    scan: ScanResult,
+    options: ReportFindingOptions,
+    *,
+    page_size: int = 50,
+) -> ReportFindingPage:
+    raw_active_actionable = [
+        finding
+        for finding in deduplicate_findings_by_fingerprint(scan.findings)
+        if finding.status != "resolved" and finding.severity in ACTIONABLE_SEVERITIES
+    ]
+    duplicate_counts = _duplicate_counts(scan.findings)
+    prioritised = prioritise_findings(raw_active_actionable, limit=max(1, len(raw_active_actionable)))
+    views = [
+        ReportFindingView(
+            finding=item.finding,
+            priority=item,
+            rank=index,
+            anchor=_finding_anchor(item.finding),
+            duplicate_count=duplicate_counts.get(item.finding.fingerprint, 1),
+        )
+        for index, item in enumerate(prioritised, start=1)
+    ]
+    filtered = _filter_finding_views(views, options)
+    sorted_views = _sort_finding_views(filtered, options.sort)
+    total_pages = max(1, (len(sorted_views) + page_size - 1) // page_size)
+    page = min(max(1, options.page), total_pages)
+    start = (page - 1) * page_size
+    page_options = ReportFindingOptions(
+        severity=options.severity,
+        production=options.production,
+        scanner=options.scanner,
+        category=options.category,
+        path_type=options.path_type,
+        status=options.status,
+        sort=options.sort,
+        page=page,
+    )
+    return ReportFindingPage(
+        all_findings=views,
+        filtered_findings=sorted_views,
+        page_findings=sorted_views[start : start + page_size],
+        options=page_options,
+        total_count=len(views),
+        filtered_count=len(sorted_views),
+        page_count=page,
+        total_pages=total_pages,
+        has_more_than_top_three=len(views) > 3,
+    )
+
+
+def _priority_card(
+    index: int,
+    view: ReportFindingView,
+    has_baseline: bool,
+    *,
+    report_path: str,
+) -> str:
+    details = prioritised_finding_details(view.priority, has_baseline=has_baseline)
     production_relevance = (
         "Production path" if details["directory_group"] == "production" else details["directory_group"]
     )
+    finding_url = _finding_url(report_path, view.anchor)
     return f"""
     <article class="priority-card">
       <p class="eyebrow">Priority {index}</p>
@@ -1755,14 +1890,517 @@ def _priority_card(index: int, item: Any, has_baseline: bool) -> str:
         <div><dt>Location</dt><dd>{_escape(details["location"])}</dd></div>
         <div><dt>Finding source</dt><dd>{_escape(details["finding_source"])}</dd></div>
         <div><dt>Status</dt><dd>{_escape(details["status"])}</dd></div>
-        <div><dt>Confidence</dt><dd>Scanner-reported finding</dd></div>
+        <div><dt>Priority position</dt><dd>{_escape(view.rank)} of {_escape("all deduplicated active actionable findings")}</dd></div>
       </dl>
-      <p><strong>Why it matters:</strong> {_escape(details["why"])}</p>
+      <p><strong>Why this is prioritised:</strong> {_escape(details["why"])}</p>
       <p><strong>Recommended action:</strong> {_escape(details["action"])}</p>
+      <p><a class="text-link" href="{_escape(finding_url)}">View full finding</a></p>
       <p class="unavailable">Estimated effort, projected risk reduction, projected Production
       Health and related findings resolved are unavailable until impact simulation is implemented.</p>
     </article>
     """
+
+
+def _all_findings_section(page: ReportFindingPage, report_path: str) -> str:
+    if page.total_count == 0:
+        return """
+        <section id="all-findings" class="report-section">
+          <h2>All findings</h2>
+          <p class="empty">No deduplicated active actionable findings were available to explore.</p>
+        </section>
+        """
+    rows = "\n".join(
+        _finding_detail(view, page.options.sort == "recommended")
+        for view in page.page_findings
+    )
+    intro = (
+        f"Showing {page.filtered_count} filtered results from {page.total_count} deduplicated active actionable findings."
+        if page.filtered_count != page.total_count
+        else f"Showing {page.total_count} deduplicated active actionable findings."
+    )
+    return f"""
+    <section id="all-findings" class="report-section all-findings">
+      <h2>All findings <a class="definition-link" href="#definition-actionable-findings" aria-label="What actionable findings means">?</a></h2>
+      <p class="count-note">{_escape(intro)} This count excludes resolved findings and info or unknown severity findings. Duplicate fingerprints are shown once.</p>
+      {_finding_filter_form(page, report_path)}
+      <div class="finding-results" aria-live="polite">
+        <p class="count-note">Page {page.page_count} of {page.total_pages}. Default order matches DriftBeacon's deterministic prioritisation logic.</p>
+        {rows or '<p class="empty">No findings match the selected filters.</p>'}
+      </div>
+      {_pagination(page, report_path)}
+      <script>
+        function openTargetFinding() {{
+          if (!window.location.hash) return;
+          const target = document.querySelector(window.location.hash);
+          if (target && target.tagName.toLowerCase() === 'details') {{
+            target.open = true;
+            target.classList.add('targeted');
+          }}
+        }}
+        window.addEventListener('hashchange', openTargetFinding);
+        openTargetFinding();
+      </script>
+    </section>
+    """
+
+
+def _finding_detail(view: ReportFindingView, recommended_sort: bool) -> str:
+    finding = view.finding
+    details = prioritised_finding_details(view.priority, has_baseline=False)
+    location = _finding_location(finding)
+    priority_text = (
+        f"Priority {view.rank}"
+        if recommended_sort
+        else f"Priority rank {view.rank} in recommended order"
+    )
+    duplicate_note = (
+        f"<li>Related duplicate findings: {view.duplicate_count} normalised findings shared this fingerprint.</li>"
+        if view.duplicate_count > 1
+        else "<li>Related duplicate findings: none collapsed for this fingerprint.</li>"
+    )
+    remediation = finding.remediation or "Review the scanner rule, confirm whether the affected configuration is used, and reduce the risky configuration where applicable."
+    return f"""
+    <details id="{_escape(view.anchor)}" class="finding-detail">
+      <summary>
+        <span class="finding-title">{_escape(finding.title)}</span>
+        <span class="badge severity-{_escape(finding.severity)}">{_escape(finding.severity.capitalize())}</span>
+        <span class="badge">{_escape(_production_relevance_label(finding))}</span>
+        <span class="finding-path">{_escape(location)}</span>
+      </summary>
+      <div class="finding-body">
+        <dl class="finding-meta">
+          <div><dt>Priority position</dt><dd>{_escape(priority_text)}</dd></div>
+          <div><dt>Scanner source</dt><dd>{_escape(finding.scanner)}</dd></div>
+          <div><dt>Scanner identifier</dt><dd>{_escape(finding.rule_id)}</dd></div>
+          <div><dt>Category</dt><dd>{_escape(finding.category)}</dd></div>
+          <div><dt>Status</dt><dd>{_escape(finding.status)}</dd></div>
+          <div><dt>Path type</dt><dd>{_escape(_path_type(finding))}</dd></div>
+        </dl>
+        <h3>What was found</h3>
+        <p>{_escape(finding.description or finding.title)}</p>
+        <h3>Why DriftBeacon prioritised it</h3>
+        <ul class="plain-list">
+          <li>Severity: {_escape(finding.severity.capitalize())}</li>
+          <li>Production relevance: {_escape(_production_relevance_label(finding))}</li>
+          <li>Found in: {_escape(location)}</li>
+          <li>Scanner evidence: {_escape(finding.title)}</li>
+          <li>Priority rule explanation: {_escape(view.priority.reason)}</li>
+        </ul>
+        <h3>Why this matters</h3>
+        <p>{_escape(details["why"])}</p>
+        <h3>Recommended action</h3>
+        <p>{_escape(remediation)}</p>
+        <details class="technical-details">
+          <summary>Technical details</summary>
+          <ul class="plain-list">
+            <li>Affected file: {_escape(finding.file_path or "not reported")}</li>
+            <li>Line: {_escape(finding.line_start if finding.line_start is not None else "not reported")}</li>
+            <li>Resource: {_escape(finding.resource or "not reported")}</li>
+            <li>Fingerprint: {_escape(finding.fingerprint)}</li>
+            {duplicate_note}
+          </ul>
+        </details>
+        <p class="unavailable">Limitations: DriftBeacon uses static scanner output and path classification. Confirm whether this configuration is actually deployed before treating it as production risk.</p>
+      </div>
+    </details>
+    """
+
+
+def _score_breakdown(title: str, counts: Mapping[str, int]) -> str:
+    return f"""
+    <div class="score-breakdown" aria-label="{_escape(title)}">
+      <h3>{_escape(title)}</h3>
+      <ul>
+        <li><strong>{_escape(counts.get("critical", 0))}</strong><span>Critical</span></li>
+        <li><strong>{_escape(counts.get("high", 0))}</strong><span>High</span></li>
+        <li><strong>{_escape(counts.get("medium", 0))}</strong><span>Medium</span></li>
+        <li><strong>{_escape(counts.get("low", 0))}</strong><span>Low</span></li>
+      </ul>
+    </div>
+    """
+
+
+def _score_calculation_disclosure(score_type: str) -> str:
+    included = (
+        "deduplicated active critical, high, medium and low findings in paths classified as production"
+        if score_type == "production"
+        else "deduplicated active critical, high, medium and low findings included in scoring across the scanned repository"
+    )
+    return f"""
+    <details class="explanation">
+      <summary>How this score is calculated</summary>
+      <p>The score uses {included}. Critical findings weigh more than high, medium and low findings. Informational and unknown-severity findings do not reduce the score. Duplicate fingerprints are counted once. Scanner coverage affects whether the grade is marked provisional.</p>
+      <p>The score is a prioritisation signal, not a guarantee that the repository or production environment is secure.</p>
+    </details>
+    """
+
+
+def _score_divergence_callout(scan: ScanResult, *, threshold: int = 20) -> str:
+    production_score = _optional_int(scan.summary.get("production_health_score"))
+    overall_score = scan.health_score
+    if production_score is None or overall_score is None:
+        return ""
+    difference = abs(production_score - overall_score)
+    if difference < threshold:
+        return ""
+    production_count = len(_production_score_findings(scan))
+    overall_count = len(_overall_score_findings(scan))
+    other_count = max(0, overall_count - production_count)
+    if production_score > overall_score:
+        explanation = (
+            f"Production Health is {production_score}/100 because the files classified as production-relevant contain {production_count} included actionable findings. "
+            f"Overall Health is {overall_score}/100 because the wider repository contains {other_count} included actionable findings outside those production-relevant paths."
+        )
+    else:
+        explanation = (
+            f"Production Health is {production_score}/100 while Overall Health is {overall_score}/100 because production-relevant paths contain a higher concentration or severity of included findings than the wider repository."
+        )
+    return f"""
+    <section class="report-section divergence-callout" aria-labelledby="score-divergence-heading">
+      <h2 id="score-divergence-heading">Why are these scores so different?</h2>
+      <p>{_escape(explanation)}</p>
+      <dl class="compact-stats">
+        <div><dt>Production-relevant included findings</dt><dd>{production_count}</dd></div>
+        <div><dt>Other included findings</dt><dd>{other_count}</dd></div>
+        <div><dt>Score difference</dt><dd>{difference} points</dd></div>
+      </dl>
+      <p>This does not mean the additional findings should be ignored. It means DriftBeacon is separating likely production risk from broader repository hygiene.</p>
+    </section>
+    """
+
+
+def _scanner_coverage_section(scan: ScanResult) -> str:
+    scanner_rows = "\n".join(
+        f"<li><strong>{_escape(status.name.capitalize())}:</strong> {_escape(status.status.replace('_', ' ').capitalize())}. {_escape(status.message)}</li>"
+        for status in scan.scanner_statuses.values()
+    ) or "<li>No scanner status was recorded.</li>"
+    summary = scan.summary
+    supported_files = summary.get("supported_files_scanned")
+    coverage = _coverage_text(summary)
+    source_rows = _breakdown_rows(summary.get("finding_source_breakdown"))
+    group_rows = _breakdown_rows(summary.get("directory_group_breakdown"))
+    supported_text = (
+        f"{supported_files} supported files were scanned."
+        if isinstance(supported_files, int)
+        else "Supported-file count was not recorded for this report."
+    )
+    return f"""
+    <section class="report-section evidence" aria-labelledby="scanner-coverage-heading">
+      <h2 id="scanner-coverage-heading">Scanner coverage <a class="definition-link" href="#definition-scanner-coverage" aria-label="What scanner coverage means">?</a></h2>
+      <p>{_escape(coverage)} for supported file types. {_escape(supported_text)} DriftBeacon performs static analysis only and does not execute the submitted application.</p>
+      <div class="evidence-grid">
+        <article>
+          <h3>Scanner status</h3>
+          <ul>{scanner_rows}</ul>
+        </article>
+        <article>
+          <h3>Finding source breakdown</h3>
+          {_table(source_rows, "Source")}
+        </article>
+        <article>
+          <h3>Path classification breakdown</h3>
+          {_table(group_rows, "Path type")}
+        </article>
+      </div>
+    </section>
+    """
+
+
+def _report_glossary() -> str:
+    definitions = [
+        ("definition-production-health", "Production Health", "A 0 to 100 prioritisation score calculated from deduplicated active actionable findings in paths DriftBeacon classifies as production-relevant or likely production-related."),
+        ("definition-overall-health", "Overall Health", "A 0 to 100 score calculated from included deduplicated active actionable findings across the scanned repository."),
+        ("definition-top-priorities", "Top priorities", "The highest-ranked findings according to DriftBeacon's deterministic prioritisation rules. The ranking considers severity, lifecycle status, production-like paths, category, blast-radius indicators, recurrence and whether remediation guidance exists."),
+        ("definition-actionable-findings", "Actionable findings", "Deduplicated active findings with critical, high, medium or low severity. Info and unknown-severity findings are retained for auditability but are not included in health scoring."),
+        ("definition-production-relevance", "Production relevance", "A static path classification signal. It means the finding appears in a path that looks production-related; it does not prove the resource is deployed."),
+        ("definition-scanner-coverage", "Scanner coverage", "Which configured scanners completed for supported file types. Partial or failed coverage means findings and scores may be incomplete."),
+        ("definition-severity", "Severity", "The severity reported or normalised from scanner output. Critical findings reduce health more than high, medium and low findings."),
+        ("definition-limitations", "Limitations", "DriftBeacon uses static analysis and scanner output. Reports can contain false positives and false negatives and are not a substitute for security review."),
+    ]
+    body = "\n".join(
+        f"""
+        <details id="{anchor}" class="glossary-item">
+          <summary>{_escape(term)}</summary>
+          <p>{_escape(text)}</p>
+        </details>
+        """
+        for anchor, term, text in definitions
+    )
+    return f"""
+    <section class="report-section glossary" aria-labelledby="report-glossary-heading">
+      <h2 id="report-glossary-heading">How to read this report</h2>
+      <p>Use these definitions when interpreting scores, priorities and scanner coverage.</p>
+      {body}
+    </section>
+    """
+
+
+def _query_choice(values: dict[str, list[str]], key: str, allowed: set[str]) -> str:
+    candidate = (values.get(key) or [""])[0].strip().lower()
+    return candidate if candidate in allowed else ""
+
+
+def _query_text(values: dict[str, list[str]], key: str) -> str:
+    candidate = (values.get(key) or [""])[0].strip().lower()
+    if len(candidate) > 80:
+        return ""
+    if not re.fullmatch(r"[a-z0-9_.:-]*", candidate):
+        return ""
+    return candidate
+
+
+def _query_int(values: dict[str, list[str]], key: str, default: int) -> int:
+    candidate = (values.get(key) or [""])[0].strip()
+    if not candidate:
+        return default
+    with suppress(ValueError):
+        return int(candidate)
+    return default
+
+
+def _duplicate_counts(findings: list[Finding]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for finding in findings:
+        counts[finding.fingerprint] = counts.get(finding.fingerprint, 0) + 1
+    return counts
+
+
+def _finding_anchor(finding: Finding) -> str:
+    seed = finding.fingerprint or f"{finding.id}:{finding.rule_id}:{finding.file_path}"
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:12]
+    return f"finding-{digest}"
+
+
+def _filter_finding_views(
+    views: list[ReportFindingView],
+    options: ReportFindingOptions,
+) -> list[ReportFindingView]:
+    filtered: list[ReportFindingView] = []
+    for view in views:
+        finding = view.finding
+        path_type = _path_type(finding).lower()
+        if options.severity and finding.severity != options.severity:
+            continue
+        if options.production == "production" and path_type != "production":
+            continue
+        if options.production == "other" and path_type == "production":
+            continue
+        if options.scanner and finding.scanner.lower() != options.scanner:
+            continue
+        if options.category and finding.category.lower() != options.category:
+            continue
+        if options.path_type and path_type != options.path_type:
+            continue
+        if options.status and finding.status != options.status:
+            continue
+        filtered.append(view)
+    return filtered
+
+
+def _sort_finding_views(
+    views: list[ReportFindingView],
+    sort: str,
+) -> list[ReportFindingView]:
+    severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    if sort == "severity":
+        return sorted(
+            views,
+            key=lambda view: (
+                severity_order.get(view.finding.severity, 99),
+                view.rank,
+                _finding_location(view.finding).lower(),
+            ),
+        )
+    if sort == "production":
+        return sorted(
+            views,
+            key=lambda view: (
+                0 if _path_type(view.finding) == "production" else 1,
+                severity_order.get(view.finding.severity, 99),
+                view.rank,
+            ),
+        )
+    if sort == "path":
+        return sorted(
+            views,
+            key=lambda view: (_finding_location(view.finding).lower(), view.rank),
+        )
+    return list(views)
+
+
+def _finding_url(report_path: str, anchor: str) -> str:
+    query = urlencode({"sort": "recommended", "page": "1"})
+    base = report_path or ""
+    return f"{base}?{query}#{anchor}"
+
+
+def _finding_location(finding: Finding) -> str:
+    location = finding.file_path or "path not reported"
+    if finding.line_start is not None:
+        return f"{location}:{finding.line_start}"
+    return location
+
+
+def _production_relevance_label(finding: Finding) -> str:
+    path_type = _path_type(finding)
+    if path_type == "production":
+        return "Production path"
+    if path_type == "unknown":
+        return "Unknown path type"
+    return f"Non-production path ({path_type.replace('_', ' ')})"
+
+
+def _path_type(finding: Finding) -> str:
+    return finding.directory_group or classify_path_group(finding.file_path)
+
+
+def _top_priority_summary(page: ReportFindingPage) -> str:
+    if page.total_count == 0:
+        return "No active actionable findings are available to prioritise."
+    if page.has_more_than_top_three:
+        return (
+            f"Top priorities show 3 of {page.total_count}. "
+            f'<a class="text-link" href="#all-findings">View all {page.total_count} '
+            "deduplicated active actionable findings</a>."
+        )
+    return f"All {page.total_count} deduplicated active actionable findings are shown here."
+
+
+def _finding_filter_form(page: ReportFindingPage, report_path: str) -> str:
+    options = page.options
+    scanner_values = sorted({view.finding.scanner.lower() for view in page.all_findings})
+    category_values = sorted({view.finding.category.lower() for view in page.all_findings})
+    path_values = sorted({_path_type(view.finding).lower() for view in page.all_findings})
+    action = f"{report_path}#all-findings" if report_path else "#all-findings"
+    return f"""
+    <form class="finding-filters" method="get" action="{_escape(action)}" aria-label="Filter findings">
+      <label for="filter-severity">Severity
+        <select id="filter-severity" name="severity">
+          {_select_options((("", "All severities"), ("critical", "Critical"), ("high", "High"), ("medium", "Medium"), ("low", "Low")), options.severity)}
+        </select>
+      </label>
+      <label for="filter-production">Production relevance
+        <select id="filter-production" name="production">
+          {_select_options((("", "All paths"), ("production", "Production paths"), ("other", "Non-production and unknown paths")), options.production)}
+        </select>
+      </label>
+      <label for="filter-scanner">Scanner
+        <select id="filter-scanner" name="scanner">
+          {_select_options((("", "All scanners"), *[(value, value) for value in scanner_values]), options.scanner)}
+        </select>
+      </label>
+      <label for="filter-category">Category
+        <select id="filter-category" name="category">
+          {_select_options((("", "All categories"), *[(value, value.replace("_", " ").title()) for value in category_values]), options.category)}
+        </select>
+      </label>
+      <label for="filter-path-type">Path type
+        <select id="filter-path-type" name="path_type">
+          {_select_options((("", "All path types"), *[(value, value.replace("_", " ").title()) for value in path_values]), options.path_type)}
+        </select>
+      </label>
+      <label for="filter-status">Status
+        <select id="filter-status" name="status">
+          {_select_options((("", "All statuses"), ("new", "New"), ("recurring", "Recurring"), ("resolved", "Resolved")), options.status)}
+        </select>
+      </label>
+      <label for="filter-sort">Sort
+        <select id="filter-sort" name="sort">
+          {_select_options((("recommended", "Recommended"), ("severity", "Severity"), ("production", "Production first"), ("path", "Path")), options.sort)}
+        </select>
+      </label>
+      <div class="filter-actions">
+        <button type="submit">Apply filters</button>
+        <a class="button-link secondary" href="{_escape((report_path or '') + '#all-findings')}">Clear</a>
+      </div>
+    </form>
+    """
+
+
+def _select_options(values: tuple[tuple[str, str], ...], selected: str) -> str:
+    return "\n".join(
+        f'<option value="{_escape(value)}"{" selected" if value == selected else ""}>{_escape(label)}</option>'
+        for value, label in values
+    )
+
+
+def _pagination(page: ReportFindingPage, report_path: str) -> str:
+    if page.total_pages <= 1:
+        return ""
+    previous_link = (
+        f'<a class="button-link secondary" href="{_escape(_findings_page_url(report_path, page.options, page.page_count - 1))}">Previous</a>'
+        if page.page_count > 1
+        else '<span class="pagination-disabled">Previous</span>'
+    )
+    next_link = (
+        f'<a class="button-link secondary" href="{_escape(_findings_page_url(report_path, page.options, page.page_count + 1))}">Next</a>'
+        if page.page_count < page.total_pages
+        else '<span class="pagination-disabled">Next</span>'
+    )
+    return f"""
+    <nav class="pagination" aria-label="Finding pages">
+      {previous_link}
+      <span>Page {page.page_count} of {page.total_pages}</span>
+      {next_link}
+    </nav>
+    """
+
+
+def _findings_page_url(report_path: str, options: ReportFindingOptions, page_number: int) -> str:
+    query: dict[str, str] = {}
+    if options.severity:
+        query["severity"] = options.severity
+    if options.production:
+        query["production"] = options.production
+    if options.scanner:
+        query["scanner"] = options.scanner
+    if options.category:
+        query["category"] = options.category
+    if options.path_type:
+        query["path_type"] = options.path_type
+    if options.status:
+        query["status"] = options.status
+    if options.sort != "recommended":
+        query["sort"] = options.sort
+    if page_number > 1:
+        query["page"] = str(page_number)
+    base = report_path or ""
+    encoded = urlencode(query)
+    return f"{base}?{encoded}#all-findings" if encoded else f"{base}#all-findings"
+
+
+def _production_severity_counts(scan: ScanResult) -> dict[str, int]:
+    return _severity_counts_for_report(production_findings(scan.findings))
+
+
+def _severity_counts_for_report(findings: list[Finding]) -> dict[str, int]:
+    counts = severity_counts(findings)
+    return {
+        "critical": counts["critical"],
+        "high": counts["high"],
+        "medium": counts["medium"],
+        "low": counts["low"],
+    }
+
+
+def _production_score_findings(scan: ScanResult) -> list[Finding]:
+    return [
+        finding
+        for finding in deduplicate_findings_by_fingerprint(production_findings(scan.findings))
+        if finding.status != "resolved"
+        and finding.severity in ACTIONABLE_SEVERITIES
+        and not finding.excluded_from_score
+    ]
+
+
+def _overall_score_findings(scan: ScanResult) -> list[Finding]:
+    return [
+        finding
+        for finding in deduplicate_findings_by_fingerprint(scan.findings)
+        if finding.status != "resolved"
+        and finding.severity in ACTIONABLE_SEVERITIES
+        and not finding.excluded_from_score
+    ]
 
 
 def _report_actions(state: WebScanState | None) -> str:
@@ -1842,6 +2480,17 @@ def _feedback_form(
           <label><input type="radio" name="changed_priority" value="maybe"> Maybe</label>
           <label><input type="radio" name="changed_priority" value="no"> No</label>
         </fieldset>
+        <label for="difficult_to_understand">What was hardest to understand?</label>
+        <select id="difficult_to_understand" name="difficult_to_understand">
+          <option value="">Nothing specific</option>
+          <option value="production_health">Production Health</option>
+          <option value="overall_health">Overall Health</option>
+          <option value="score_difference">Why the scores differed</option>
+          <option value="top_priorities">Top priorities</option>
+          <option value="finding_explanations">Finding explanations</option>
+          <option value="scanner_coverage">Scanner coverage</option>
+          <option value="other">Something else</option>
+        </select>
         <label for="comment">What was useful, confusing or missing?</label>
         <textarea id="comment" name="comment" maxlength="2000" rows="4"></textarea>
         <label class="check-row">
@@ -2126,12 +2775,13 @@ def _css() -> str:
     h1 { font-size:clamp(2.2rem,5vw,4.7rem); line-height:1; margin:10px 0 18px; letter-spacing:0; }
     h2 { font-size:1.55rem; margin:0 0 14px; }
     h3 { margin:0 0 12px; font-size:1.08rem; }
+    p, li, th, td, summary, h1, h2, h3 { overflow-wrap:anywhere; }
     .lead { font-size:1.2rem; max-width:760px; color:#2d3a33; }
     .scan-form { margin-top:28px; }
     label, legend { display:block; font-weight:700; margin-bottom:8px; }
     .form-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; max-width:760px; }
     .access-row { margin-top:14px; max-width:360px; }
-    input, textarea { width:100%; min-height:46px; border:1px solid var(--line); border-radius:8px; padding:0 14px; font:inherit; background:#fff; }
+    input, textarea, select { width:100%; min-height:46px; border:1px solid var(--line); border-radius:8px; padding:0 14px; font:inherit; background:#fff; }
     textarea { padding:12px 14px; resize:vertical; }
     button, .button-link { min-height:46px; border:0; border-radius:8px; padding:0 18px; font-weight:800; color:#fff; background:var(--accent); cursor:pointer; display:inline-flex; align-items:center; text-decoration:none; }
     button:disabled, input:disabled { opacity:0.62; cursor:not-allowed; }
@@ -2141,11 +2791,11 @@ def _css() -> str:
     .button-link.secondary { background:#2d3a33; }
     .report-actions { display:flex; flex-wrap:wrap; gap:10px; margin:16px 0; }
     .retention-note, .notice { border:1px solid var(--line); border-radius:8px; padding:12px; background:#fff; color:var(--muted); }
-    .band, .split, .methodology-note, .panel, .report-status, .health-focus, .impact, .evidence, .feedback-section {
+    .band, .split, .methodology-note, .panel, .report-status, .report-section, .health-focus, .impact, .evidence, .feedback-section {
       border-top:1px solid var(--line); padding:28px 0; }
     .steps, .split, .health-focus, .evidence-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:18px; }
     .split, .health-focus { grid-template-columns:1fr 1fr; }
-    article, .health-focus aside, .health-focus > div { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:18px; }
+    article, .health-focus aside, .health-focus > div { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:18px; min-width:0; }
     .steps article span { display:block; color:var(--muted); margin-top:6px; }
     .status-grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px; margin:18px 0 0; }
     .status-grid div { border:1px solid var(--line); border-radius:8px; padding:12px; background:#fff; }
@@ -2158,9 +2808,42 @@ def _css() -> str:
     .score { font-size:4.2rem; line-height:1; font-weight:900; margin:8px 0; color:var(--accent); }
     .support-score { font-size:1.55rem; font-weight:800; }
     .grade { font-weight:800; color:var(--accent-2); }
+    .definition-link { display:inline-flex; align-items:center; justify-content:center; width:1.35rem; height:1.35rem;
+      border-radius:50%; border:1px solid var(--line); color:var(--accent); text-decoration:none; font-size:0.86rem; vertical-align:middle; }
+    .score-breakdown { margin:16px 0; border-top:1px solid var(--line); padding-top:14px; }
+    .score-breakdown ul { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; list-style:none; padding:0; margin:0; }
+    .score-breakdown li { border:1px solid var(--line); border-radius:8px; padding:10px; background:#f8faf7; }
+    .score-breakdown strong { display:block; font-size:1.25rem; }
+    details.explanation, .technical-details, .glossary-item { border:1px solid var(--line); border-radius:8px; padding:12px; background:#fff; margin-top:10px; }
+    details > summary { cursor:pointer; font-weight:800; }
+    .divergence-callout { background:#fff7eb; border:1px solid #f1c77c; border-radius:8px; padding:18px; margin:22px 0; }
+    .compact-stats { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin:12px 0 0; }
+    .compact-stats div { border:1px solid #edd4a1; border-radius:8px; padding:10px; background:#fff; }
     .priority-list { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; }
     .priority-card dl { display:grid; gap:8px; margin:12px 0; }
     .priority-card dl div { border-top:1px solid var(--line); padding-top:8px; }
+    .count-note { color:var(--muted); }
+    .finding-filters { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin:18px 0; align-items:end; }
+    .finding-filters label { margin:0; min-width:0; }
+    .filter-actions { display:flex; gap:10px; flex-wrap:wrap; }
+    .finding-results { display:grid; gap:10px; }
+    .finding-detail { background:#fff; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+    .finding-detail:target, .finding-detail.targeted { border-color:var(--accent); box-shadow:0 0 0 3px rgba(23,107,86,.14); }
+    .finding-detail summary { display:grid; grid-template-columns:minmax(0,1fr) auto auto minmax(160px,.8fr); gap:10px; align-items:center; padding:14px; }
+    .finding-detail summary::-webkit-details-marker { display:none; }
+    .finding-title { font-weight:850; min-width:0; }
+    .finding-path { color:var(--muted); font-size:0.9rem; overflow-wrap:anywhere; word-break:break-word; min-width:0; }
+    .finding-body { border-top:1px solid var(--line); padding:16px; }
+    .finding-meta { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin:0 0 16px; }
+    .finding-meta div { border:1px solid var(--line); border-radius:8px; padding:10px; background:#f8faf7; min-width:0; }
+    .badge { display:inline-flex; align-items:center; min-height:28px; border:1px solid var(--line); border-radius:999px; padding:2px 9px; font-size:0.82rem; font-weight:800; white-space:normal; }
+    .severity-critical { background:#fff0ec; color:#7b2718; border-color:#e5a08d; }
+    .severity-high { background:#fff7eb; color:#7a4a00; border-color:#f1c77c; }
+    .severity-medium { background:#eef6ff; color:#1a4f7a; border-color:#a5c7e6; }
+    .severity-low { background:#edf8f2; color:#176b56; border-color:#9dc9b9; }
+    .pagination { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:16px; }
+    .pagination-disabled { min-height:46px; display:inline-flex; align-items:center; border:1px solid var(--line); border-radius:8px; padding:0 18px; color:var(--muted); background:#fff; }
+    .glossary { display:grid; gap:10px; }
     .unavailable, .empty { color:var(--muted); font-size:0.92rem; }
     .alert { border:1px solid #c65a42; background:#fff0ec; color:#7b2718; border-radius:8px; padding:12px; }
     .alert h2 { font-size:1rem; margin:0 0 6px; }
@@ -2179,7 +2862,8 @@ def _css() -> str:
       *, *::before, *::after { scroll-behavior:auto !important; transition:none !important; animation:none !important; }
     }
     @media (max-width:850px) {
-      .form-row, .steps, .split, .health-focus, .priority-list, .evidence-grid, .status-grid { grid-template-columns:1fr; }
+      .form-row, .steps, .split, .health-focus, .priority-list, .evidence-grid, .status-grid,
+      .score-breakdown ul, .compact-stats, .finding-filters, .finding-meta, .finding-detail summary { grid-template-columns:1fr; }
       h1 { font-size:2.4rem; }
       .score { font-size:3.2rem; }
       .site-header { align-items:flex-start; gap:8px; flex-direction:column; }

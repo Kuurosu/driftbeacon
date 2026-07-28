@@ -19,6 +19,7 @@ from driftbeacon.web import (
     DriftBeaconWebApp,
     FileReportStore,
     PublicGitHubRepositoryProvider,
+    ReportFindingOptions,
     WebConfig,
     WebScanArtifacts,
     WebScanFailure,
@@ -235,7 +236,9 @@ def test_web_routes_submit_scan_and_render_status(tmp_path: Path) -> None:
     status, _headers, body = _request(app, "GET", location)
     assert status.startswith("200")
     assert "owner/repo" in body
-    assert "What to fix next" in body
+    assert "Top priorities" in body
+    assert "All findings" in body
+    assert "No deduplicated active actionable findings were available to explore." in body
     assert "data-interest-link" in body
 
     status, _headers, body = _request(app, "GET", f"/scans/{scan_id}/report.md")
@@ -466,7 +469,8 @@ def test_sample_report_uses_fixture_data_without_database_job(tmp_path: Path) ->
     assert status.startswith("200")
     assert "Example report" in body
     assert "Production Health" in body
-    assert "What to fix next" in body
+    assert "Top priorities" in body
+    assert "View all" in body
     assert "example/public-infra-demo" in body
     assert service.store.count_queued_scans() == 0
 
@@ -478,6 +482,7 @@ def test_feedback_submission_stores_optional_email_only_with_consent(tmp_path: P
         {
             "helpfulness": "partly",
             "changed_priority": "maybe",
+            "difficult_to_understand": "score_difference",
             "comment": "<script>useful but confusing</script>",
             "private_monitoring_interest": "yes",
             "email": "tester@example.com",
@@ -491,6 +496,7 @@ def test_feedback_submission_stores_optional_email_only_with_consent(tmp_path: P
     rows = service.store.list_feedback()
     assert len(rows) == 1
     assert rows[0].comment == "<script>useful but confusing</script>"
+    assert rows[0].difficult_to_understand == "score_difference"
     assert rows[0].private_monitoring_interest is True
     assert rows[0].email is None
     assert rows[0].consent_to_contact is False
@@ -526,6 +532,54 @@ def test_feedback_honeypot_does_not_store_submission(tmp_path: Path) -> None:
 
     assert status.startswith("303")
     assert service.store.list_feedback() == []
+
+
+def test_sample_report_explains_score_divergence_and_full_explorer() -> None:
+    scan, comparison = sample_report_data()
+
+    html = render_repository_report_page(scan, comparison, sample=True)
+
+    assert "Why are these scores so different?" in html
+    assert "Production Health is" in html
+    assert "Overall Health is" in html
+    assert "How this score is calculated" in html
+    assert "View all 64 deduplicated active actionable findings" in html
+    assert 'href="/sample-report?sort=recommended&amp;page=1#finding-' in html
+    assert "What was hardest to understand?" in html
+    assert "overflow-wrap:anywhere" in html
+
+
+def test_report_finding_explorer_filters_and_paginates() -> None:
+    scan, comparison = sample_report_data()
+
+    filtered = render_repository_report_page(
+        scan,
+        comparison,
+        sample=True,
+        options=ReportFindingOptions(severity="medium"),
+    )
+    second_page = render_repository_report_page(
+        scan,
+        comparison,
+        sample=True,
+        options=ReportFindingOptions(page=2),
+    )
+
+    assert "Showing 7 filtered results from 64 deduplicated active actionable findings." in filtered
+    assert 'value="medium" selected' in filtered
+    assert "Page 2 of 2" in second_page
+    assert "Generated example dependency vulnerability" in second_page
+
+
+def test_report_top_summary_handles_exactly_three_findings() -> None:
+    scan, _comparison = sample_report_data()
+    scan.findings = scan.findings[:3]
+    comparison = compare_scans(scan, None)
+
+    html = render_repository_report_page(scan, comparison, sample=True)
+
+    assert "All 3 deduplicated active actionable findings are shown here." in html
+    assert "View all 3" not in html
 
 
 def test_web_report_prioritises_production_health_and_reuses_explanations(
@@ -573,14 +627,18 @@ def test_web_report_prioritises_production_health_and_reuses_explanations(
     html = render_repository_report_page(current_scan, comparison)
 
     assert html.index("Production Health") < html.index("Overall Health")
-    assert html.index("Production Health") < html.index("Severity distribution")
-    assert "What to fix next" in html
+    assert html.index("Production Health") < html.index("Top priorities")
+    assert "Top priorities" in html
+    assert "All findings" in html
+    assert "How to read this report" in html
+    assert "Scanner coverage" in html
     assert "AWS Access Key ID" in html
-    assert "Why it matters" in html
+    assert "Why this matters" in html
     assert "Remove the hardcoded secret and rotate it if it was committed." in html
     assert "Production path" in html
     assert "Partial coverage" in html
     assert "Provisional grade" in html
+    assert "Supporting evidence" not in html
     assert "unavailable in this MVP" in html
     assert "Estimated effort: 1" not in html
     assert "Projected risk reduction: 61%" not in html

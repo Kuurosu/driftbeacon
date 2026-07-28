@@ -119,6 +119,7 @@ def test_feedback_export_command_writes_csv(tmp_path: Path) -> None:
             source_hash="hash-only",
             helpfulness="yes",
             changed_priority="maybe",
+            difficult_to_understand="top_priorities",
             private_monitoring_interest=True,
             comment="useful",
             email="tester@example.com",
@@ -141,3 +142,4 @@ def test_feedback_export_command_writes_csv(tmp_path: Path) -> None:
     text = output.read_text(encoding="utf-8")
     assert "tester@example.com" in text
     assert "useful" in text
+    assert "top_priorities" in text

@@ -161,11 +161,11 @@ The web MVP accepts only HTTPS public GitHub repository URLs, stores queued scan
 The public web experience is designed for a controlled beta:
 
 - The homepage explains DriftBeacon's value proposition, beta scope and public-link limits.
-- `/sample-report` shows a static fixture report without creating a scan job.
+- `/sample-report` shows a static fixture report without creating a scan job, including score explanations, a Production Health versus Overall Health callout and the full findings explorer.
 - Invite mode can require a beta access code before a scan starts.
 - `DRIFTBEACON_BETA_ACCEPTING_SCANS=false` pauses new submissions while keeping existing reports and health endpoints available.
 - Daily source and global scan limits are stored in SQLite using a keyed hash of the client source rather than raw IP addresses.
-- Completed reports include a short feedback form and private-monitoring interest prompt.
+- Completed reports include Top priorities, all deduplicated active actionable findings, scanner coverage, a report glossary, a short feedback form and a private-monitoring interest prompt.
 
 The web process only validates requests, creates queued scan jobs, reads status and serves completed reports. Run a separate worker process to claim queued scans and execute Git clone, Checkov and Trivy:
 
