@@ -570,6 +570,8 @@ def test_sample_report_explains_score_divergence_and_full_explorer() -> None:
     assert 'href="/sample-report?view=all#all-findings" target="_blank"' in html
     assert "data-report-tab=\"overview\"" in html
     assert "data-theme-toggle" in html
+    assert 'class="header-scan-form"' in html
+    assert 'id="header_repository_url"' in html
     assert 'class="theme-icon theme-icon-sun"' in html
     assert 'class="theme-icon theme-icon-moon"' in html
     assert "const theme = stored || 'dark'" in html
@@ -577,6 +579,11 @@ def test_sample_report_explains_score_divergence_and_full_explorer() -> None:
     assert "help-popover" in html
     assert 'class="brand-lockup"' in html
     assert 'class="brand-mark"' in html
+    assert 'class="repo-identity"' in html
+    assert 'class="repo-owner">example</span>' in html
+    assert 'class="repo-name">public-infra-demo</span>' in html
+    assert "Repository metric" in html
+    assert "support-score" not in html
     assert ".site-footer { position:fixed" in html
     assert 'class="footer-links"' in html
     assert "--accent:#63e6aa" in html

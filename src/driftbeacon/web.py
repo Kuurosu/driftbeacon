@@ -1424,7 +1424,6 @@ def render_progress_page(state: WebScanState) -> str:
         "DriftBeacon scan progress",
         f"""
         <main class="narrow">
-          <a class="back-link" href="/">Start another scan</a>
           <section class="panel">
             <p class="eyebrow">Repository analysis</p>
             <h1>{_escape(state.repository_label)}</h1>
@@ -1443,6 +1442,7 @@ def render_progress_page(state: WebScanState) -> str:
         </main>
         {polling}
         """,
+        header_scan_form=True,
     )
 
 
@@ -1478,6 +1478,7 @@ def render_repository_report_page(
     provisional = " Provisional grade." if summary.get("production_grade_provisional") is True else ""
     retention_notice = _retention_notice(state)
     actions = _report_actions(state)
+    repo_heading = _repository_heading(scan.repository)
     sample_notice = (
         """
         <div class="notice" role="status">
@@ -1497,10 +1498,12 @@ def render_repository_report_page(
         f"DriftBeacon report for {scan.repository}",
         f"""
         <main class="report-main" data-initial-tab="{_escape(initial_tab)}">
-          <a class="back-link" href="/">Analyse another repository</a>
           <section class="report-status">
             {sample_notice}
-            <h1>{_escape(scan.repository)}</h1>
+            <div class="repo-identity">
+              <p class="eyebrow">DriftBeacon report</p>
+              {repo_heading}
+            </div>
             {actions}
             {retention_notice}
             <dl class="status-grid">
@@ -1534,9 +1537,11 @@ def render_repository_report_page(
                 {_score_calculation_disclosure("production")}
                 {finding_notice}
               </div>
-              <aside class="score-card">
+              <aside class="score-card score-card-secondary">
+                <p class="eyebrow">Repository metric</p>
                 <h2>Overall Health {_help_bubble("Overall Health", "A 0 to 100 score calculated from included deduplicated active actionable findings across the scanned repository, including non-production areas where detected.")}</h2>
-                <p class="support-score">{_escape(overall_health)} / Grade {_escape(overall_grade)}</p>
+                <p class="score">{_escape(overall_health)}</p>
+                <p class="grade">Grade {_escape(overall_grade)}</p>
                 <p>Overall Health reflects included findings across the scanned repository, including development, example, test, generated and non-production areas where detected.</p>
                 <p>A low Overall Health score can be caused by many findings outside the areas DriftBeacon considers production-relevant.</p>
                 {_score_breakdown("All included findings", _severity_counts_for_report(scan.findings))}
@@ -1628,6 +1633,7 @@ def render_repository_report_page(
           </script>
         </main>
         """,
+        header_scan_form=True,
     )
 
 
@@ -2901,8 +2907,31 @@ def _breakdown_cards(rows: list[tuple[str, int, int, int, int, int]], label: str
     """
 
 
-def _page(title: str, body: str) -> str:
+def _repository_heading(repository: str) -> str:
+    if "/" in repository:
+        owner, name = repository.split("/", 1)
+        return f"""
+        <h1 class="repo-title">
+          <span class="repo-owner">{_escape(owner)}</span><span class="repo-separator">/</span><span class="repo-name">{_escape(name)}</span>
+        </h1>
+        """
+    return f'<h1 class="repo-title"><span class="repo-name">{_escape(repository)}</span></h1>'
+
+
+def _header_scan_form() -> str:
+    return """
+    <form class="header-scan-form" method="post" action="/scans">
+      <label class="sr-only" for="header_repository_url">Public GitHub repository URL</label>
+      <input id="header_repository_url" name="repository_url" type="url"
+        placeholder="Paste GitHub repo URL" autocomplete="url" required>
+      <button type="submit">Analyse</button>
+    </form>
+    """
+
+
+def _page(title: str, body: str, *, header_scan_form: bool = False) -> str:
     description = "DriftBeacon prioritises public repository findings by Production Health."
+    header_action = _header_scan_form() if header_scan_form else '<span class="header-pill">Production Health reports</span>'
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -2936,7 +2965,7 @@ def _page(title: str, body: str) -> str:
       </span>
     </a>
     <div class="header-actions">
-      <span class="header-pill">Production Health reports</span>
+      {header_action}
       <button type="button" class="theme-toggle" data-theme-toggle aria-label="Switch colour theme">
         <span class="theme-icon theme-icon-sun" aria-hidden="true">
           <svg viewBox="0 0 24 24" focusable="false">
@@ -3037,7 +3066,12 @@ def _css() -> str:
     .eyebrow, dt { color:var(--muted); font-size:0.86rem; }
     .header-pill { color:var(--muted); border:1px solid var(--line); border-radius:999px; padding:5px 9px; font-size:.76rem; font-weight:800;
       background:color-mix(in srgb, var(--panel-2) 84%, transparent); white-space:nowrap; }
-    .header-actions { display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:flex-end; }
+    .header-actions { display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:flex-end; min-width:0; }
+    .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+    .header-scan-form { display:grid; grid-template-columns:minmax(220px,360px) auto; gap:8px; align-items:center; min-width:min(520px,52vw); }
+    .header-scan-form input { min-height:38px; border-radius:999px; padding:0 14px; font-size:.86rem;
+      background:color-mix(in srgb, var(--panel-2) 92%, transparent); box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent); }
+    .header-scan-form button { min-height:38px; border-radius:999px; padding:0 14px; font-size:.84rem; white-space:nowrap; }
     main { max-width:1120px; margin:0 auto; padding:34px clamp(18px,4vw,48px) 110px; position:relative; z-index:1; }
     .narrow { max-width:760px; }
     .hero { padding:52px 0 38px; max-width:850px; }
@@ -3082,6 +3116,12 @@ def _css() -> str:
       linear-gradient(135deg, color-mix(in srgb, var(--panel) 92%, transparent), color-mix(in srgb, var(--accent) 6%, var(--panel)));
       box-shadow:var(--shadow); }
     .report-status::after { content:""; position:absolute; inset:auto 18px 0 18px; height:2px; background:linear-gradient(90deg, transparent, var(--accent), transparent); opacity:.72; }
+    .repo-identity { position:relative; padding-left:18px; margin-bottom:10px; }
+    .repo-identity::before { content:""; position:absolute; left:0; top:7px; bottom:7px; width:3px; border-radius:999px; background:var(--accent); box-shadow:0 0 22px var(--glow); }
+    .repo-title { display:flex; flex-wrap:wrap; align-items:baseline; gap:.06em; font-size:clamp(2rem,4.4vw,4.1rem); line-height:.96; margin:6px 0 8px; }
+    .repo-owner { color:var(--muted); font-weight:750; }
+    .repo-separator { color:var(--accent); font-weight:800; text-shadow:0 0 18px var(--glow); }
+    .repo-name { color:var(--ink); font-weight:950; text-shadow:0 0 28px color-mix(in srgb, var(--accent) 12%, transparent); }
     article, .health-focus aside, .health-focus > div { background:linear-gradient(180deg, color-mix(in srgb, var(--panel) 96%, transparent), var(--panel-2)); border:1px solid color-mix(in srgb, var(--line) 88%, transparent); border-radius:8px; padding:18px; min-width:0; box-shadow:var(--shadow); }
     .steps article span { display:block; color:var(--muted); margin-top:6px; }
     .status-grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px; margin:18px 0 0; }
@@ -3113,8 +3153,9 @@ def _css() -> str:
     .step-list .complete { border-color:color-mix(in srgb, var(--accent) 55%, var(--line)); }
     .step-list .current { border-color:var(--accent); box-shadow:0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent); }
     .step-list .failed { border-color:#c65a42; }
-    .score { font-size:4.2rem; line-height:1; font-weight:900; margin:8px 0; color:var(--accent); }
-    .support-score { font-size:1.55rem; font-weight:800; }
+    .score-card { display:flex; flex-direction:column; }
+    .score-card-primary, .score-card-secondary { border-color:color-mix(in srgb, var(--accent) 28%, var(--line)); }
+    .score { font-size:4.2rem; line-height:1; font-weight:900; margin:8px 0; color:var(--accent); text-shadow:0 0 24px var(--glow); }
     .grade { font-weight:800; color:var(--accent-2); }
     .report-tabs { position:sticky; top:0; z-index:2; display:flex; flex-wrap:wrap; gap:8px; padding:12px 0; background:color-mix(in srgb, var(--paper) 88%, transparent); backdrop-filter:blur(18px); border-bottom:1px solid var(--line); }
     .report-tabs button { min-height:38px; background:var(--panel-2); color:var(--ink); border:1px solid var(--line); box-shadow:none; }
@@ -3204,6 +3245,9 @@ def _css() -> str:
       .score { font-size:3.2rem; }
       .site-header { align-items:flex-start; gap:8px; flex-direction:column; }
       .header-actions { justify-content:space-between; width:100%; }
+      .theme-toggle { order:1; margin-left:auto; }
+      .header-scan-form { order:2; width:100%; min-width:0; flex:1 1 100%; grid-template-columns:minmax(0,1fr) auto; }
+      .repo-title { font-size:2.6rem; }
       .metric-row { grid-template-columns:1fr; }
       .report-tabs { position:static; }
       .help-bubble { left:auto; right:0; transform:none; }
