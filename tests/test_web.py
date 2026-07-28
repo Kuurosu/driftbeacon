@@ -287,6 +287,27 @@ def test_health_endpoints_do_not_expose_internal_paths(tmp_path: Path) -> None:
     assert str(tmp_path) not in ready_body
 
 
+def test_progress_page_updates_step_list_from_polling_state(tmp_path: Path) -> None:
+    state = WebScanState(
+        scan_id="abcdef123456",
+        repository_url="https://github.com/owner/repo.git",
+        repository_owner="owner",
+        repository_name="repo",
+        status="queued",
+        message="Queued for analysis.",
+        progress=5,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+
+    html = render_progress_page(state)
+
+    assert 'data-step-key="queued"' in html
+    assert 'data-step-key="analysing"' in html
+    assert "updateProgressSteps(data.status)" in html
+    assert "stageLabels[data.status]" in html
+
+
 def test_readiness_fails_safely_when_storage_is_unhealthy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -471,6 +492,7 @@ def test_sample_report_uses_fixture_data_without_database_job(tmp_path: Path) ->
     assert "Production Health" in body
     assert "Top priorities" in body
     assert "View all" in body
+    assert "sort=#all-findings" not in body
     assert "example/public-infra-demo" in body
     assert service.store.count_queued_scans() == 0
 
@@ -544,7 +566,12 @@ def test_sample_report_explains_score_divergence_and_full_explorer() -> None:
     assert "Overall Health is" in html
     assert "How this score is calculated" in html
     assert "View all 64 deduplicated active actionable findings" in html
-    assert 'href="/sample-report?sort=recommended&amp;page=1#finding-' in html
+    assert 'href="/sample-report?view=all&amp;sort=recommended&amp;page=1#finding-' in html
+    assert 'href="/sample-report?view=all#all-findings" target="_blank"' in html
+    assert "data-report-tab=\"overview\"" in html
+    assert "data-theme-toggle" in html
+    assert "localStorage.setItem('driftbeacon-theme'" in html
+    assert "help-popover" in html
     assert "What was hardest to understand?" in html
     assert "overflow-wrap:anywhere" in html
 
@@ -564,11 +591,20 @@ def test_report_finding_explorer_filters_and_paginates() -> None:
         sample=True,
         options=ReportFindingOptions(page=2),
     )
+    expanded_second_page = render_repository_report_page(
+        scan,
+        comparison,
+        sample=True,
+        options=ReportFindingOptions(view="all", page=2),
+    )
 
     assert "Showing 7 filtered results from 64 deduplicated active actionable findings." in filtered
     assert 'value="medium" selected' in filtered
-    assert "Page 2 of 2" in second_page
-    assert "Generated example dependency vulnerability" in second_page
+    assert "Page 2 of 7" in second_page
+    assert "Open the full findings explorer" in second_page
+    assert "Page 2 of 2" in expanded_second_page
+    assert "Expanded findings explorer" in expanded_second_page
+    assert "Generated example dependency vulnerability" in expanded_second_page
 
 
 def test_report_top_summary_handles_exactly_three_findings() -> None:

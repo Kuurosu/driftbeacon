@@ -264,6 +264,7 @@ class WebScanArtifacts:
 class ReportFindingOptions:
     """Query options for the web findings explorer."""
 
+    view: str = ""
     severity: str = ""
     production: str = ""
     scanner: str = ""
@@ -1381,12 +1382,34 @@ def render_progress_page(state: WebScanState) -> str:
     polling = (
         """
         <script>
+          const stageLabels = {
+            queued: 'Queued',
+            cloning: 'Cloning repository',
+            analysing: 'Checking repository limits and analysing findings',
+            generating_report: 'Preparing prioritised report',
+            completed: 'Completed',
+            failed: 'Failed safely',
+            expired: 'Expired'
+          };
+          const stepOrder = ['queued', 'cloning', 'analysing', 'generating_report', 'completed'];
+          function updateProgressSteps(status) {
+            const currentIndex = stepOrder.includes(status) ? stepOrder.indexOf(status) : 0;
+            document.querySelectorAll('[data-step-key]').forEach((step) => {
+              const stepIndex = stepOrder.indexOf(step.dataset.stepKey);
+              let state = stepIndex < currentIndex ? 'complete' : stepIndex === currentIndex ? 'current' : 'waiting';
+              if (status === 'failed' && stepIndex === currentIndex) state = 'failed';
+              step.className = state;
+              const label = step.querySelector('small');
+              if (label) label.textContent = state;
+            });
+          }
           async function pollScan() {
             const response = await fetch(window.location.pathname.replace('/scans/', '/api/scans/'));
             if (!response.ok) return;
             const data = await response.json();
-            document.querySelector('[data-status]').textContent = data.status;
+            document.querySelector('[data-status]').textContent = stageLabels[data.status] || data.status;
             document.querySelector('[data-message]').textContent = data.message;
+            updateProgressSteps(data.status);
             if (data.status === 'completed' || data.status === 'failed' || data.status === 'expired') {
               window.location.reload();
             }
@@ -1436,7 +1459,13 @@ def render_repository_report_page(
 
     summary = scan.summary
     report_path = "/sample-report" if sample else f"/scans/{state.scan_id}" if state else ""
-    finding_page = build_report_finding_page(scan, options or ReportFindingOptions())
+    report_options = options or ReportFindingOptions()
+    expanded_findings = report_options.view == "all"
+    finding_page = build_report_finding_page(
+        scan,
+        report_options,
+        page_size=50 if expanded_findings else 10,
+    )
     finding_notice = _finding_state_notice(scan)
     priority_cards = "\n".join(
         _priority_card(index, view, comparison.has_baseline, report_path=report_path)
@@ -1460,13 +1489,14 @@ def render_repository_report_page(
         else ""
     )
     scan_id = state.scan_id if state is not None else None
-    top_summary = _top_priority_summary(finding_page)
+    top_summary = _top_priority_summary(finding_page, report_path)
     divergence = _score_divergence_callout(scan)
     glossary = _report_glossary()
+    initial_tab = "findings" if expanded_findings else "overview"
     return _page(
         f"DriftBeacon report for {scan.repository}",
         f"""
-        <main>
+        <main class="report-main" data-initial-tab="{_escape(initial_tab)}">
           <a class="back-link" href="/">Analyse another repository</a>
           <section class="report-status">
             {sample_notice}
@@ -1482,69 +1512,117 @@ def render_repository_report_page(
             </dl>
           </section>
 
-          <section class="report-section health-focus" aria-labelledby="production-health-heading">
-            <div class="score-card score-card-primary">
-              <p class="eyebrow">Primary metric</p>
-              <h2 id="production-health-heading">Production Health <a class="definition-link" href="#definition-production-health" aria-label="What Production Health means">?</a></h2>
-              <p class="score">{_escape(production_health)}</p>
-              <p class="grade">Grade {_escape(production_grade)}{_escape(provisional)}</p>
-              <p>Production Health focuses on findings that DriftBeacon classifies as production-relevant or likely production-related from repository paths.</p>
-              <p>A high Production Health score means those production-relevant areas have relatively few or lower-impact included findings. It does not mean the entire repository is healthy or secure.</p>
-              <p>{_escape(str(summary.get("production_score_reason", "No production score reason recorded.")))}</p>
-              {_score_breakdown("Production-relevant included findings", _production_severity_counts(scan))}
-              {_score_calculation_disclosure("production")}
-              {finding_notice}
-            </div>
-            <aside class="score-card">
-              <h2>Overall Health <a class="definition-link" href="#definition-overall-health" aria-label="What Overall Health means">?</a></h2>
-              <p class="support-score">{_escape(overall_health)} / Grade {_escape(overall_grade)}</p>
-              <p>Overall Health reflects included findings across the scanned repository, including development, example, test, generated and non-production areas where detected.</p>
-              <p>A low Overall Health score can be caused by many findings outside the areas DriftBeacon considers production-relevant.</p>
-              {_score_breakdown("All included findings", _severity_counts_for_report(scan.findings))}
-              {_score_calculation_disclosure("overall")}
-            </aside>
+          <nav class="report-tabs" role="tablist" aria-label="Report sections">
+            <button type="button" role="tab" data-report-tab="overview" aria-controls="tab-overview">Overview</button>
+            <button type="button" role="tab" data-report-tab="priorities" aria-controls="tab-priorities">Priorities</button>
+            <button type="button" role="tab" data-report-tab="findings" aria-controls="tab-findings">Findings</button>
+            <button type="button" role="tab" data-report-tab="coverage" aria-controls="tab-coverage">Coverage</button>
+            <button type="button" role="tab" data-report-tab="feedback" aria-controls="tab-feedback">Feedback</button>
+          </nav>
+
+          <section id="tab-overview" class="tab-panel" data-tab-panel="overview" role="tabpanel">
+            <section class="report-section health-focus" aria-labelledby="production-health-heading">
+              <div class="score-card score-card-primary">
+                <p class="eyebrow">Primary metric</p>
+                <h2 id="production-health-heading">Production Health {_help_bubble("Production Health", "A 0 to 100 prioritisation score calculated from deduplicated active actionable findings in paths DriftBeacon classifies as production-relevant. It does not prove the deployed environment is secure.")}</h2>
+                <p class="score">{_escape(production_health)}</p>
+                <p class="grade">Grade {_escape(production_grade)}{_escape(provisional)}</p>
+                <p>Production Health focuses on findings that DriftBeacon classifies as production-relevant or likely production-related from repository paths.</p>
+                <p>A high Production Health score means those production-relevant areas have relatively few or lower-impact included findings. It does not mean the entire repository is healthy or secure.</p>
+                <p>{_escape(str(summary.get("production_score_reason", "No production score reason recorded.")))}</p>
+                {_score_breakdown("Production-relevant included findings", _production_severity_counts(scan))}
+                {_score_calculation_disclosure("production")}
+                {finding_notice}
+              </div>
+              <aside class="score-card">
+                <h2>Overall Health {_help_bubble("Overall Health", "A 0 to 100 score calculated from included deduplicated active actionable findings across the scanned repository, including non-production areas where detected.")}</h2>
+                <p class="support-score">{_escape(overall_health)} / Grade {_escape(overall_grade)}</p>
+                <p>Overall Health reflects included findings across the scanned repository, including development, example, test, generated and non-production areas where detected.</p>
+                <p>A low Overall Health score can be caused by many findings outside the areas DriftBeacon considers production-relevant.</p>
+                {_score_breakdown("All included findings", _severity_counts_for_report(scan.findings))}
+                {_score_calculation_disclosure("overall")}
+              </aside>
+            </section>
+
+            {divergence}
+
+            <section class="report-section impact">
+              <h2>What to do with this report</h2>
+              <p>Current production-relevant actionable findings: <strong>{summary.get("production_actionable_findings", 0)}</strong>.</p>
+              <p>Start with the top priorities, inspect the full finding detail, confirm whether each affected path is actually used for production, and then apply the recommended remediation in your normal engineering workflow.</p>
+              <p>Projected risk reduction, estimated effort and projected Production Health are
+              unavailable in this MVP because remediation-impact simulation has not been implemented.
+              DriftBeacon will only show those values after they are calculated from the real scoring
+              model.</p>
+            </section>
           </section>
 
-          {divergence}
-
-          <section class="report-section" aria-labelledby="top-priorities-heading">
-            <h2 id="top-priorities-heading">Top priorities <a class="definition-link" href="#definition-top-priorities" aria-label="What top priorities means">?</a></h2>
-            <p>These are the three issues DriftBeacon recommends investigating first based on production relevance, severity and the deterministic priority rules.</p>
-            <p class="count-note">{top_summary}</p>
-            <div class="priority-list">{priority_cards}</div>
+          <section id="tab-priorities" class="tab-panel" data-tab-panel="priorities" role="tabpanel">
+            <section class="report-section" aria-labelledby="top-priorities-heading">
+              <h2 id="top-priorities-heading">Top priorities {_help_bubble("Top priorities", "The three findings DriftBeacon recommends investigating first based on severity, production relevance and deterministic prioritisation rules.")}</h2>
+              <p>These are the three issues DriftBeacon recommends investigating first based on production relevance, severity and the deterministic priority rules.</p>
+              <p class="count-note">{top_summary}</p>
+              <div class="priority-list">{priority_cards}</div>
+            </section>
           </section>
 
-          {_all_findings_section(finding_page, report_path)}
-
-          <section class="report-section impact">
-            <h2>What to do with this report</h2>
-            <p>Current production-relevant actionable findings: <strong>{summary.get("production_actionable_findings", 0)}</strong>.</p>
-            <p>Start with the top priorities, inspect the full finding detail, confirm whether each affected path is actually used for production, and then apply the recommended remediation in your normal engineering workflow.</p>
-            <p>Projected risk reduction, estimated effort and projected Production Health are
-            unavailable in this MVP because remediation-impact simulation has not been implemented.
-            DriftBeacon will only show those values after they are calculated from the real scoring
-            model.</p>
+          <section id="tab-findings" class="tab-panel" data-tab-panel="findings" role="tabpanel">
+            {_all_findings_section(finding_page, report_path)}
           </section>
 
-          {_scanner_coverage_section(scan)}
-
-          {glossary}
-
-          <section class="methodology-note">
-            <h2>Private monitoring interest</h2>
-            <p>Want continuous monitoring for private repositories?</p>
-            <p>DriftBeacon plans to support private GitHub repositories, scan history, Production
-            Health trends and Slack alerts.</p>
-            <p><a class="button-link" href="#feedback" data-interest-link>Register interest</a></p>
+          <section id="tab-coverage" class="tab-panel" data-tab-panel="coverage" role="tabpanel">
+            {_scanner_coverage_section(scan)}
+            {glossary}
           </section>
 
-          {_feedback_form(scan_id=scan_id, submitted=feedback_submitted, sample=sample)}
+          <section id="tab-feedback" class="tab-panel" data-tab-panel="feedback" role="tabpanel">
+            <section class="methodology-note">
+              <h2>Private monitoring interest</h2>
+              <p>Want continuous monitoring for private repositories?</p>
+              <p>DriftBeacon plans to support private GitHub repositories, scan history, Production
+              Health trends and Slack alerts.</p>
+              <p><a class="button-link" href="#feedback" data-interest-link>Register interest</a></p>
+            </section>
+
+            {_feedback_form(scan_id=scan_id, submitted=feedback_submitted, sample=sample)}
+          </section>
+
           <script>
+            const reportMain = document.querySelector('[data-initial-tab]');
+            const tabButtons = Array.from(document.querySelectorAll('[data-report-tab]'));
+            const tabPanels = Array.from(document.querySelectorAll('[data-tab-panel]'));
+            function setReportTab(tabName) {{
+              tabButtons.forEach((button) => {{
+                const active = button.dataset.reportTab === tabName;
+                button.classList.toggle('is-active', active);
+                button.setAttribute('aria-selected', active ? 'true' : 'false');
+              }});
+              tabPanels.forEach((panel) => {{
+                const active = panel.dataset.tabPanel === tabName;
+                panel.classList.toggle('is-active', active);
+                panel.toggleAttribute('hidden', !active);
+              }});
+            }}
+            tabButtons.forEach((button) => {{
+              button.addEventListener('click', () => {{
+                setReportTab(button.dataset.reportTab);
+                history.replaceState(null, '', '#' + button.dataset.reportTab);
+              }});
+            }});
+            const hashTab = window.location.hash.replace('#', '');
+            const startingTab = ['overview', 'priorities', 'findings', 'coverage', 'feedback'].includes(hashTab)
+              ? hashTab
+              : reportMain.dataset.initialTab || 'overview';
+            setReportTab(startingTab);
+            if (window.location.hash.startsWith('#finding-') || window.location.hash === '#all-findings') {{
+              setReportTab('findings');
+            }}
             const interestLink = document.querySelector('[data-interest-link]');
             if (interestLink) {{
               interestLink.addEventListener('click', () => {{
                 const interestBox = document.getElementById('private_monitoring_interest');
                 if (interestBox) interestBox.checked = true;
+                setReportTab('feedback');
               }});
             }}
           </script>
@@ -1806,13 +1884,15 @@ def render_not_found_page() -> str:
 def report_finding_options_from_environ(environ: WSGIEnvironment) -> ReportFindingOptions:
     values = parse_qs(str(environ.get("QUERY_STRING") or ""), keep_blank_values=True)
     return ReportFindingOptions(
+        view=_query_choice(values, "view", {"", "all"}),
         severity=_query_choice(values, "severity", {"", *ACTIONABLE_SEVERITIES}),
         production=_query_choice(values, "production", {"", "production", "other"}),
         scanner=_query_text(values, "scanner"),
         category=_query_text(values, "category"),
         path_type=_query_text(values, "path_type"),
         status=_query_choice(values, "status", {"", "new", "recurring", "resolved"}),
-        sort=_query_choice(values, "sort", {"recommended", "severity", "production", "path"}),
+        sort=_query_choice(values, "sort", {"recommended", "severity", "production", "path"})
+        or "recommended",
         page=max(1, _query_int(values, "page", 1)),
     )
 
@@ -1846,6 +1926,7 @@ def build_report_finding_page(
     page = min(max(1, options.page), total_pages)
     start = (page - 1) * page_size
     page_options = ReportFindingOptions(
+        view=options.view,
         severity=options.severity,
         production=options.production,
         scanner=options.scanner,
@@ -1913,15 +1994,27 @@ def _all_findings_section(page: ReportFindingPage, report_path: str) -> str:
         _finding_detail(view, page.options.sort == "recommended")
         for view in page.page_findings
     )
+    expanded = page.options.view == "all"
     intro = (
         f"Showing {page.filtered_count} filtered results from {page.total_count} deduplicated active actionable findings."
         if page.filtered_count != page.total_count
         else f"Showing {page.total_count} deduplicated active actionable findings."
     )
+    full_url = _findings_page_url(report_path, page.options, 1, force_expanded=True)
+    explorer_note = (
+        '<p class="count-note">Expanded findings explorer. Use filters and page numbers to move through the full deduplicated finding set.</p>'
+        if expanded
+        else (
+            '<p class="count-note">Compact preview: this report page shows shorter finding pages. '
+            f'<a class="text-link" href="{_escape(full_url)}" target="_blank" rel="noopener">Open the full findings explorer</a> in a new tab for the longer list.</p>'
+        )
+    )
+    section_class = "report-section all-findings expanded-findings" if expanded else "report-section all-findings compact-findings"
     return f"""
-    <section id="all-findings" class="report-section all-findings">
-      <h2>All findings <a class="definition-link" href="#definition-actionable-findings" aria-label="What actionable findings means">?</a></h2>
+    <section id="all-findings" class="{section_class}">
+      <h2>All findings {_help_bubble("Actionable findings", "Deduplicated active findings with critical, high, medium or low severity. Info and unknown-severity findings remain available in data exports but do not reduce the health score.")}</h2>
       <p class="count-note">{_escape(intro)} This count excludes resolved findings and info or unknown severity findings. Duplicate fingerprints are shown once.</p>
+      {explorer_note}
       {_finding_filter_form(page, report_path)}
       <div class="finding-results" aria-live="polite">
         <p class="count-note">Page {page.page_count} of {page.total_pages}. Default order matches DriftBeacon's deterministic prioritisation logic.</p>
@@ -2006,6 +2099,16 @@ def _finding_detail(view: ReportFindingView, recommended_sort: bool) -> str:
     """
 
 
+def _help_bubble(label: str, text: str) -> str:
+    safe_label = _escape(label)
+    return f"""
+    <span class="help-popover">
+      <button type="button" class="help-trigger" aria-label="{safe_label}: explanation">?</button>
+      <span class="help-bubble" role="tooltip"><strong>{safe_label}</strong>{_escape(text)}</span>
+    </span>
+    """
+
+
 def _score_breakdown(title: str, counts: Mapping[str, int]) -> str:
     return f"""
     <div class="score-breakdown" aria-label="{_escape(title)}">
@@ -2086,7 +2189,7 @@ def _scanner_coverage_section(scan: ScanResult) -> str:
     )
     return f"""
     <section class="report-section evidence" aria-labelledby="scanner-coverage-heading">
-      <h2 id="scanner-coverage-heading">Scanner coverage <a class="definition-link" href="#definition-scanner-coverage" aria-label="What scanner coverage means">?</a></h2>
+      <h2 id="scanner-coverage-heading">Scanner coverage {_help_bubble("Scanner coverage", "Shows which configured scanners completed for supported file types. Partial or failed coverage means findings and scores may be incomplete.")}</h2>
       <p>{_escape(coverage)} for supported file types. {_escape(supported_text)} DriftBeacon performs static analysis only and does not execute the submitted application.</p>
       <div class="evidence-grid">
         <article>
@@ -2229,7 +2332,7 @@ def _sort_finding_views(
 
 
 def _finding_url(report_path: str, anchor: str) -> str:
-    query = urlencode({"sort": "recommended", "page": "1"})
+    query = urlencode({"view": "all", "sort": "recommended", "page": "1"})
     base = report_path or ""
     return f"{base}?{query}#{anchor}"
 
@@ -2254,14 +2357,15 @@ def _path_type(finding: Finding) -> str:
     return finding.directory_group or classify_path_group(finding.file_path)
 
 
-def _top_priority_summary(page: ReportFindingPage) -> str:
+def _top_priority_summary(page: ReportFindingPage, report_path: str) -> str:
     if page.total_count == 0:
         return "No active actionable findings are available to prioritise."
     if page.has_more_than_top_three:
+        full_url = _findings_page_url(report_path, page.options, 1, force_expanded=True)
         return (
             f"Top priorities show 3 of {page.total_count}. "
-            f'<a class="text-link" href="#all-findings">View all {page.total_count} '
-            "deduplicated active actionable findings</a>."
+            f'<a class="text-link" href="{_escape(full_url)}" target="_blank" rel="noopener">View all {page.total_count} '
+            "deduplicated active actionable findings</a> in a separate tab."
         )
     return f"All {page.total_count} deduplicated active actionable findings are shown here."
 
@@ -2272,8 +2376,11 @@ def _finding_filter_form(page: ReportFindingPage, report_path: str) -> str:
     category_values = sorted({view.finding.category.lower() for view in page.all_findings})
     path_values = sorted({_path_type(view.finding).lower() for view in page.all_findings})
     action = f"{report_path}#all-findings" if report_path else "#all-findings"
+    view_input = '<input type="hidden" name="view" value="all">' if options.view == "all" else ""
+    clear_target = _findings_page_url(report_path, options, 1, clear_filters=True)
     return f"""
     <form class="finding-filters" method="get" action="{_escape(action)}" aria-label="Filter findings">
+      {view_input}
       <label for="filter-severity">Severity
         <select id="filter-severity" name="severity">
           {_select_options((("", "All severities"), ("critical", "Critical"), ("high", "High"), ("medium", "Medium"), ("low", "Low")), options.severity)}
@@ -2311,7 +2418,7 @@ def _finding_filter_form(page: ReportFindingPage, report_path: str) -> str:
       </label>
       <div class="filter-actions">
         <button type="submit">Apply filters</button>
-        <a class="button-link secondary" href="{_escape((report_path or '') + '#all-findings')}">Clear</a>
+        <a class="button-link secondary" href="{_escape(clear_target)}">Clear</a>
       </div>
     </form>
     """
@@ -2327,6 +2434,10 @@ def _select_options(values: tuple[tuple[str, str], ...], selected: str) -> str:
 def _pagination(page: ReportFindingPage, report_path: str) -> str:
     if page.total_pages <= 1:
         return ""
+    page_links = "\n".join(
+        _pagination_link(page, report_path, page_number)
+        for page_number in _pagination_page_numbers(page.page_count, page.total_pages)
+    )
     previous_link = (
         f'<a class="button-link secondary" href="{_escape(_findings_page_url(report_path, page.options, page.page_count - 1))}">Previous</a>'
         if page.page_count > 1
@@ -2341,26 +2452,63 @@ def _pagination(page: ReportFindingPage, report_path: str) -> str:
     <nav class="pagination" aria-label="Finding pages">
       {previous_link}
       <span>Page {page.page_count} of {page.total_pages}</span>
+      <span class="page-links">{page_links}</span>
       {next_link}
     </nav>
     """
 
 
-def _findings_page_url(report_path: str, options: ReportFindingOptions, page_number: int) -> str:
+def _pagination_link(page: ReportFindingPage, report_path: str, page_number: int | None) -> str:
+    if page_number is None:
+        return '<span class="page-ellipsis" aria-hidden="true">...</span>'
+    if page_number == page.page_count:
+        return f'<span class="page-current" aria-current="page">{page_number}</span>'
+    return (
+        f'<a class="page-number" href="{_escape(_findings_page_url(report_path, page.options, page_number))}">'
+        f"{page_number}</a>"
+    )
+
+
+def _pagination_page_numbers(current: int, total: int) -> list[int | None]:
+    if total <= 9:
+        return list(range(1, total + 1))
+    numbers: list[int | None] = [1]
+    start = max(2, current - 2)
+    end = min(total - 1, current + 2)
+    if start > 2:
+        numbers.append(None)
+    numbers.extend(range(start, end + 1))
+    if end < total - 1:
+        numbers.append(None)
+    numbers.append(total)
+    return numbers
+
+
+def _findings_page_url(
+    report_path: str,
+    options: ReportFindingOptions,
+    page_number: int,
+    *,
+    force_expanded: bool = False,
+    clear_filters: bool = False,
+) -> str:
     query: dict[str, str] = {}
-    if options.severity:
+    view = "all" if force_expanded else options.view
+    if view:
+        query["view"] = view
+    if options.severity and not clear_filters:
         query["severity"] = options.severity
-    if options.production:
+    if options.production and not clear_filters:
         query["production"] = options.production
-    if options.scanner:
+    if options.scanner and not clear_filters:
         query["scanner"] = options.scanner
-    if options.category:
+    if options.category and not clear_filters:
         query["category"] = options.category
-    if options.path_type:
+    if options.path_type and not clear_filters:
         query["path_type"] = options.path_type
-    if options.status:
+    if options.status and not clear_filters:
         query["status"] = options.status
-    if options.sort != "recommended":
+    if options.sort and options.sort != "recommended" and not clear_filters:
         query["sort"] = options.sort
     if page_number > 1:
         query["page"] = str(page_number)
@@ -2578,12 +2726,13 @@ def _progress_steps(status: str) -> str:
     order = {key: index for index, (key, _label) in enumerate(steps)}
     current = order.get(status, len(steps) - 1 if status == "completed" else 0)
     items = []
-    for index, (_key, label) in enumerate(steps):
+    for index, (key, label) in enumerate(steps):
         state = "complete" if index < current else "current" if index == current else "waiting"
         if status == "failed" and index == current:
             state = "failed"
         items.append(
-            f'<li class="{state}"><span>{_escape(label)}</span><small>{_escape(state)}</small></li>'
+            f'<li class="{state}" data-step-key="{_escape(key)}">'
+            f"<span>{_escape(label)}</span><small>{_escape(state)}</small></li>"
         )
     return "\n".join(items)
 
@@ -2741,17 +2890,55 @@ def _page(title: str, body: str) -> str:
   <meta property="og:title" content="{_escape(title)} - DriftBeacon">
   <meta property="og:description" content="{_escape(description)}">
   <title>{_escape(title)} - DriftBeacon</title>
+  <script>
+    (function() {{
+      try {{
+        const stored = localStorage.getItem('driftbeacon-theme');
+        const theme = stored || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+        document.documentElement.dataset.theme = theme;
+      }} catch (_error) {{
+        document.documentElement.dataset.theme = 'light';
+      }}
+    }})();
+  </script>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23176b56'/%3E%3Cpath d='M8 21h16l-8-12z' fill='white'/%3E%3C/svg%3E">
   <style>{_css()}</style>
 </head>
 <body>
-  <header class="site-header"><a href="/">DriftBeacon</a><span>Production Health reports</span></header>
+  <header class="site-header">
+    <a href="/">DriftBeacon</a>
+    <div class="header-actions">
+      <span>Production Health reports</span>
+      <button type="button" class="theme-toggle" data-theme-toggle aria-label="Switch colour theme">
+        <span data-theme-label>Theme</span>
+      </button>
+    </div>
+  </header>
   {body}
   <footer class="site-footer">
     <a href="/sample-report">Example report</a>
     <a href="/privacy">Beta data and privacy</a>
     <a href="/acceptable-use">Acceptable use</a>
   </footer>
+  <script>
+    (function() {{
+      const button = document.querySelector('[data-theme-toggle]');
+      const label = document.querySelector('[data-theme-label]');
+      function applyTheme(theme) {{
+        document.documentElement.dataset.theme = theme;
+        if (label) label.textContent = theme === 'dark' ? 'Light mode' : 'Dark mode';
+        if (button) button.setAttribute('aria-label', theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode');
+      }}
+      applyTheme(document.documentElement.dataset.theme || 'light');
+      if (button) {{
+        button.addEventListener('click', () => {{
+          const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+          try {{ localStorage.setItem('driftbeacon-theme', next); }} catch (_error) {{}}
+          applyTheme(next);
+        }});
+      }}
+    }})();
+  </script>
 </body>
 </html>
 """
@@ -2760,15 +2947,20 @@ def _page(title: str, body: str) -> str:
 def _css() -> str:
     return """
     :root { color-scheme: light; --ink:#17201a; --muted:#5a675f; --line:#d8dfd9;
-      --paper:#f8faf7; --panel:#ffffff; --accent:#176b56; --accent-2:#b04428; }
+      --paper:#f8faf7; --panel:#ffffff; --accent:#176b56; --accent-2:#b04428;
+      --soft:#edf4ef; --warning:#fff7eb; --warning-line:#f1c77c; --focus:#f1b24a; }
+    :root[data-theme="dark"] { color-scheme: dark; --ink:#edf4ef; --muted:#a9b8ad; --line:#334239;
+      --paper:#111713; --panel:#19221d; --accent:#78d1b7; --accent-2:#f1a17d;
+      --soft:#223229; --warning:#2d2618; --warning-line:#7b6330; --focus:#f3c465; }
     * { box-sizing: border-box; }
     body { margin:0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       color:var(--ink); background:var(--paper); line-height:1.5; }
     .site-header { display:flex; justify-content:space-between; align-items:center; padding:18px clamp(18px,4vw,48px);
-      border-bottom:1px solid var(--line); background:#fff; }
+      border-bottom:1px solid var(--line); background:var(--panel); gap:16px; }
     .site-header a, .text-link { color:var(--accent); text-decoration-thickness:2px; text-underline-offset:3px; font-weight:800; }
     .site-header a { color:var(--ink); text-decoration:none; }
     .site-header span, .eyebrow, dt { color:var(--muted); font-size:0.86rem; }
+    .header-actions { display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:flex-end; }
     main { max-width:1120px; margin:0 auto; padding:34px clamp(18px,4vw,48px) 64px; }
     .narrow { max-width:760px; }
     .hero { padding:52px 0 38px; max-width:850px; }
@@ -2781,16 +2973,17 @@ def _css() -> str:
     label, legend { display:block; font-weight:700; margin-bottom:8px; }
     .form-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; max-width:760px; }
     .access-row { margin-top:14px; max-width:360px; }
-    input, textarea, select { width:100%; min-height:46px; border:1px solid var(--line); border-radius:8px; padding:0 14px; font:inherit; background:#fff; }
+    input, textarea, select { width:100%; min-height:46px; border:1px solid var(--line); border-radius:8px; padding:0 14px; font:inherit; background:var(--panel); color:var(--ink); }
     textarea { padding:12px 14px; resize:vertical; }
     button, .button-link { min-height:46px; border:0; border-radius:8px; padding:0 18px; font-weight:800; color:#fff; background:var(--accent); cursor:pointer; display:inline-flex; align-items:center; text-decoration:none; }
     button:disabled, input:disabled { opacity:0.62; cursor:not-allowed; }
     button:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visible {
-      outline:3px solid #f1b24a; outline-offset:3px;
+      outline:3px solid var(--focus); outline-offset:3px;
     }
-    .button-link.secondary { background:#2d3a33; }
+    .button-link.secondary { background:#2d3a33; color:#fff; }
+    .theme-toggle { min-height:34px; padding:0 12px; background:transparent; color:var(--ink); border:1px solid var(--line); }
     .report-actions { display:flex; flex-wrap:wrap; gap:10px; margin:16px 0; }
-    .retention-note, .notice { border:1px solid var(--line); border-radius:8px; padding:12px; background:#fff; color:var(--muted); }
+    .retention-note, .notice { border:1px solid var(--line); border-radius:8px; padding:12px; background:var(--panel); color:var(--muted); }
     .band, .split, .methodology-note, .panel, .report-status, .report-section, .health-focus, .impact, .evidence, .feedback-section {
       border-top:1px solid var(--line); padding:28px 0; }
     .steps, .split, .health-focus, .evidence-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:18px; }
@@ -2798,27 +2991,39 @@ def _css() -> str:
     article, .health-focus aside, .health-focus > div { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:18px; min-width:0; }
     .steps article span { display:block; color:var(--muted); margin-top:6px; }
     .status-grid { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:12px; margin:18px 0 0; }
-    .status-grid div { border:1px solid var(--line); border-radius:8px; padding:12px; background:#fff; }
+    .status-grid div { border:1px solid var(--line); border-radius:8px; padding:12px; background:var(--panel); }
     dd { margin:4px 0 0; font-weight:750; overflow-wrap:anywhere; }
     .step-list { list-style:none; padding:0; margin:22px 0; display:grid; gap:8px; }
-    .step-list li { display:flex; justify-content:space-between; gap:12px; border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:#fff; }
+    .step-list li { display:flex; justify-content:space-between; gap:12px; border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:var(--panel); }
     .step-list .complete { border-color:#86b8a5; }
     .step-list .current { border-color:var(--accent); box-shadow:0 0 0 2px rgba(23,107,86,.12); }
     .step-list .failed { border-color:#c65a42; }
     .score { font-size:4.2rem; line-height:1; font-weight:900; margin:8px 0; color:var(--accent); }
     .support-score { font-size:1.55rem; font-weight:800; }
     .grade { font-weight:800; color:var(--accent-2); }
-    .definition-link { display:inline-flex; align-items:center; justify-content:center; width:1.35rem; height:1.35rem;
-      border-radius:50%; border:1px solid var(--line); color:var(--accent); text-decoration:none; font-size:0.86rem; vertical-align:middle; }
+    .report-tabs { position:sticky; top:0; z-index:2; display:flex; flex-wrap:wrap; gap:8px; padding:12px 0; background:var(--paper); border-bottom:1px solid var(--line); }
+    .report-tabs button { min-height:38px; background:transparent; color:var(--ink); border:1px solid var(--line); }
+    .report-tabs button.is-active { color:#fff; background:var(--accent); border-color:var(--accent); }
+    .tab-panel[hidden] { display:none; }
+    .tab-panel.is-active { display:block; }
+    .help-popover { position:relative; display:inline-flex; vertical-align:middle; }
+    .help-trigger { min-height:1.45rem; width:1.45rem; padding:0; align-items:center; justify-content:center;
+      border-radius:50%; border:1px solid var(--line); background:var(--panel); color:var(--accent); font-size:0.86rem; }
+    .help-bubble { display:none; position:absolute; left:50%; bottom:calc(100% + 8px); transform:translateX(-50%);
+      width:min(320px, calc(100vw - 42px)); z-index:5; padding:12px; border:1px solid var(--line);
+      border-radius:8px; background:var(--panel); color:var(--ink); box-shadow:0 12px 30px rgba(0,0,0,.18);
+      font-size:0.9rem; font-weight:500; line-height:1.45; }
+    .help-bubble strong { display:block; margin-bottom:4px; }
+    .help-popover:hover .help-bubble, .help-popover:focus-within .help-bubble { display:block; }
     .score-breakdown { margin:16px 0; border-top:1px solid var(--line); padding-top:14px; }
     .score-breakdown ul { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; list-style:none; padding:0; margin:0; }
-    .score-breakdown li { border:1px solid var(--line); border-radius:8px; padding:10px; background:#f8faf7; }
+    .score-breakdown li { border:1px solid var(--line); border-radius:8px; padding:10px; background:var(--soft); }
     .score-breakdown strong { display:block; font-size:1.25rem; }
-    details.explanation, .technical-details, .glossary-item { border:1px solid var(--line); border-radius:8px; padding:12px; background:#fff; margin-top:10px; }
+    details.explanation, .technical-details, .glossary-item { border:1px solid var(--line); border-radius:8px; padding:12px; background:var(--panel); margin-top:10px; }
     details > summary { cursor:pointer; font-weight:800; }
-    .divergence-callout { background:#fff7eb; border:1px solid #f1c77c; border-radius:8px; padding:18px; margin:22px 0; }
+    .divergence-callout { background:var(--warning); border:1px solid var(--warning-line); border-radius:8px; padding:18px; margin:22px 0; }
     .compact-stats { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin:12px 0 0; }
-    .compact-stats div { border:1px solid #edd4a1; border-radius:8px; padding:10px; background:#fff; }
+    .compact-stats div { border:1px solid var(--warning-line); border-radius:8px; padding:10px; background:var(--panel); }
     .priority-list { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; }
     .priority-card dl { display:grid; gap:8px; margin:12px 0; }
     .priority-card dl div { border-top:1px solid var(--line); padding-top:8px; }
@@ -2827,7 +3032,9 @@ def _css() -> str:
     .finding-filters label { margin:0; min-width:0; }
     .filter-actions { display:flex; gap:10px; flex-wrap:wrap; }
     .finding-results { display:grid; gap:10px; }
-    .finding-detail { background:#fff; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+    .compact-findings .finding-results { max-width:920px; }
+    .expanded-findings .finding-results { gap:12px; }
+    .finding-detail { background:var(--panel); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
     .finding-detail:target, .finding-detail.targeted { border-color:var(--accent); box-shadow:0 0 0 3px rgba(23,107,86,.14); }
     .finding-detail summary { display:grid; grid-template-columns:minmax(0,1fr) auto auto minmax(160px,.8fr); gap:10px; align-items:center; padding:14px; }
     .finding-detail summary::-webkit-details-marker { display:none; }
@@ -2835,14 +3042,24 @@ def _css() -> str:
     .finding-path { color:var(--muted); font-size:0.9rem; overflow-wrap:anywhere; word-break:break-word; min-width:0; }
     .finding-body { border-top:1px solid var(--line); padding:16px; }
     .finding-meta { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin:0 0 16px; }
-    .finding-meta div { border:1px solid var(--line); border-radius:8px; padding:10px; background:#f8faf7; min-width:0; }
+    .finding-meta div { border:1px solid var(--line); border-radius:8px; padding:10px; background:var(--soft); min-width:0; }
     .badge { display:inline-flex; align-items:center; min-height:28px; border:1px solid var(--line); border-radius:999px; padding:2px 9px; font-size:0.82rem; font-weight:800; white-space:normal; }
     .severity-critical { background:#fff0ec; color:#7b2718; border-color:#e5a08d; }
     .severity-high { background:#fff7eb; color:#7a4a00; border-color:#f1c77c; }
     .severity-medium { background:#eef6ff; color:#1a4f7a; border-color:#a5c7e6; }
     .severity-low { background:#edf8f2; color:#176b56; border-color:#9dc9b9; }
+    :root[data-theme="dark"] .severity-critical { background:#3a1712; color:#ffb8aa; border-color:#8a3d2e; }
+    :root[data-theme="dark"] .severity-high { background:#35250d; color:#ffd48a; border-color:#8a6422; }
+    :root[data-theme="dark"] .severity-medium { background:#14283a; color:#9ed0ff; border-color:#315f89; }
+    :root[data-theme="dark"] .severity-low { background:#123427; color:#9be4cb; border-color:#33765e; }
     .pagination { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:16px; }
-    .pagination-disabled { min-height:46px; display:inline-flex; align-items:center; border:1px solid var(--line); border-radius:8px; padding:0 18px; color:var(--muted); background:#fff; }
+    .pagination-disabled { min-height:46px; display:inline-flex; align-items:center; border:1px solid var(--line); border-radius:8px; padding:0 18px; color:var(--muted); background:var(--panel); }
+    .page-links { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+    .page-number, .page-current, .page-ellipsis { min-width:34px; min-height:34px; border:1px solid var(--line); border-radius:8px;
+      display:inline-flex; align-items:center; justify-content:center; padding:0 8px; text-decoration:none; font-weight:800; }
+    .page-number { color:var(--accent); background:var(--panel); }
+    .page-current { color:#fff; background:var(--accent); border-color:var(--accent); }
+    .page-ellipsis { color:var(--muted); }
     .glossary { display:grid; gap:10px; }
     .unavailable, .empty { color:var(--muted); font-size:0.92rem; }
     .alert { border:1px solid #c65a42; background:#fff0ec; color:#7b2718; border-radius:8px; padding:12px; }
@@ -2856,7 +3073,7 @@ def _css() -> str:
     .honeypot { position:absolute; left:-10000px; width:1px; height:1px; overflow:hidden; }
     table { width:100%; border-collapse:collapse; font-size:0.9rem; display:block; overflow-x:auto; }
     th, td { text-align:left; border-bottom:1px solid var(--line); padding:7px 5px; vertical-align:top; }
-    .site-footer { border-top:1px solid var(--line); padding:20px clamp(18px,4vw,48px); display:flex; flex-wrap:wrap; gap:14px; background:#fff; }
+    .site-footer { border-top:1px solid var(--line); padding:20px clamp(18px,4vw,48px); display:flex; flex-wrap:wrap; gap:14px; background:var(--panel); }
     .site-footer a { color:var(--accent); font-weight:700; }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { scroll-behavior:auto !important; transition:none !important; animation:none !important; }
@@ -2867,6 +3084,9 @@ def _css() -> str:
       h1 { font-size:2.4rem; }
       .score { font-size:3.2rem; }
       .site-header { align-items:flex-start; gap:8px; flex-direction:column; }
+      .header-actions { justify-content:flex-start; }
+      .report-tabs { position:static; }
+      .help-bubble { left:auto; right:0; transform:none; }
     }
     """
 
