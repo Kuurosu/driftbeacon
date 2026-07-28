@@ -575,6 +575,13 @@ def test_sample_report_explains_score_divergence_and_full_explorer() -> None:
     assert "help-popover" in html
     assert ".site-footer { position:fixed" in html
     assert "--accent:#63e6aa" in html
+    assert 'class="metric-table"' in html
+    assert ">Crit</th>" in html
+    assert ">Med</th>" in html
+    assert "Checkov config" in html
+    assert "Trivy vuln" in html
+    assert ".metric-table th, .metric-table td" in html
+    assert "white-space:nowrap" in html
     assert "What was hardest to understand?" in html
     assert "overflow-wrap:anywhere" in html
 

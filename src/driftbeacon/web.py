@@ -2863,19 +2863,43 @@ def _breakdown_rows(raw: object) -> list[tuple[str, int, int, int, int, int]]:
     return rows
 
 
+def _compact_breakdown_label(name: str) -> str:
+    compact_labels = {
+        "Checkov Configuration": "Checkov config",
+        "Trivy Misconfiguration": "Trivy misconfig",
+        "Trivy Vulnerability": "Trivy vuln",
+    }
+    return compact_labels.get(name, name)
+
+
 def _table(rows: list[tuple[str, int, int, int, int, int]], label: str) -> str:
     if not rows:
         return "<p>No findings recorded.</p>"
     body = "\n".join(
-        f"<tr><td>{_escape(name)}</td><td>{critical}</td><td>{high}</td>"
-        f"<td>{medium}</td><td>{low}</td><td>{total}</td></tr>"
+        (
+            f'<tr><td class="row-label" title="{_escape(name)}">'
+            f"{_escape(_compact_breakdown_label(name))}</td><td>{critical}</td><td>{high}</td>"
+            f"<td>{medium}</td><td>{low}</td><td>{total}</td></tr>"
+        )
         for name, critical, high, medium, low, total in rows
     )
+    table_label = "Path" if label == "Path type" else label
     return f"""
-    <table>
-      <thead><tr><th>{_escape(label)}</th><th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Total</th></tr></thead>
-      <tbody>{body}</tbody>
-    </table>
+    <div class="table-scroll">
+      <table class="metric-table">
+        <thead>
+          <tr>
+            <th scope="col">{_escape(table_label)}</th>
+            <th scope="col" title="Critical findings">Crit</th>
+            <th scope="col" title="High findings">High</th>
+            <th scope="col" title="Medium findings">Med</th>
+            <th scope="col" title="Low findings">Low</th>
+            <th scope="col" title="Total actionable findings">Total</th>
+          </tr>
+        </thead>
+        <tbody>{body}</tbody>
+      </table>
+    </div>
     """
 
 
@@ -2998,7 +3022,8 @@ def _css() -> str:
     .retention-note, .notice { border:1px solid var(--line); border-radius:8px; padding:12px; background:var(--panel); color:var(--muted); }
     .band, .split, .methodology-note, .panel, .report-status, .report-section, .health-focus, .impact, .evidence, .feedback-section {
       border-top:1px solid var(--line); padding:28px 0; }
-    .steps, .split, .health-focus, .evidence-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:18px; }
+    .steps, .split, .health-focus { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:18px; }
+    .evidence-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr)); gap:18px; }
     .split, .health-focus { grid-template-columns:1fr 1fr; }
     .report-status { position:relative; overflow:hidden; border:1px solid var(--line); border-radius:8px; padding:24px; background:
       linear-gradient(135deg, color-mix(in srgb, var(--panel) 92%, transparent), color-mix(in srgb, var(--accent) 6%, var(--panel)));
@@ -3087,8 +3112,15 @@ def _css() -> str:
     fieldset label, .check-row { display:flex; gap:8px; align-items:center; font-weight:600; margin:0; }
     fieldset input, .check-row input { width:auto; min-height:0; }
     .honeypot { position:absolute; left:-10000px; width:1px; height:1px; overflow:hidden; }
-    table { width:100%; border-collapse:collapse; font-size:0.9rem; display:block; overflow-x:auto; }
+    table { width:100%; border-collapse:collapse; font-size:0.9rem; }
     th, td { text-align:left; border-bottom:1px solid var(--line); padding:7px 5px; vertical-align:top; }
+    .table-scroll { width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch; }
+    .metric-table { min-width:315px; font-size:0.86rem; table-layout:auto; }
+    .metric-table th, .metric-table td {
+      padding:7px 4px; white-space:nowrap; overflow-wrap:normal; word-break:normal;
+    }
+    .metric-table th:first-child, .metric-table td:first-child { min-width:6.6rem; text-align:left; }
+    .metric-table th:not(:first-child), .metric-table td:not(:first-child) { min-width:2rem; text-align:right; }
     .site-footer { position:fixed; left:0; right:0; bottom:0; z-index:20; border-top:1px solid var(--line); padding:14px clamp(18px,4vw,48px); display:flex; flex-wrap:wrap; gap:14px; background:color-mix(in srgb, var(--panel) 94%, transparent); backdrop-filter:blur(18px); box-shadow:0 -12px 34px rgba(0,0,0,.18); }
     .site-footer a { color:var(--accent); font-weight:700; }
     @media (prefers-reduced-motion: reduce) {
