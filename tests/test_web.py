@@ -570,8 +570,11 @@ def test_sample_report_explains_score_divergence_and_full_explorer() -> None:
     assert 'href="/sample-report?view=all#all-findings" target="_blank"' in html
     assert "data-report-tab=\"overview\"" in html
     assert "data-theme-toggle" in html
+    assert "const theme = stored || 'dark'" in html
     assert "localStorage.setItem('driftbeacon-theme'" in html
     assert "help-popover" in html
+    assert ".site-footer { position:fixed" in html
+    assert "--accent:#63e6aa" in html
     assert "What was hardest to understand?" in html
     assert "overflow-wrap:anywhere" in html
 
@@ -600,7 +603,7 @@ def test_report_finding_explorer_filters_and_paginates() -> None:
 
     assert "Showing 7 filtered results from 64 deduplicated active actionable findings." in filtered
     assert 'value="medium" selected' in filtered
-    assert "Page 2 of 7" in second_page
+    assert "Page 2 of 5" in second_page
     assert "Open the full findings explorer" in second_page
     assert "Page 2 of 2" in expanded_second_page
     assert "Expanded findings explorer" in expanded_second_page
